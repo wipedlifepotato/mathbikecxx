@@ -33,4 +33,13 @@ int main(int argc, char** argv, char **env)
                throw std::runtime_error("Cosinus of degree not equal cosinus of rads or not equal 0.81");
          }
 	}
+	// sinh / cosh
+        {
+            std::ostringstream h_cos, h_sin;
+            h_cos << Triangle::cos_deg(35, 15, true);
+            h_sin << Triangle::sin_deg(35, 15, true);
+
+            if (h_cos.str().substr(0, 4) != "1.19" || h_sin.str().substr(0, 4) != "0.64")
+                throw std::runtime_error("Hyperbolic math is broken");
+        }
 }

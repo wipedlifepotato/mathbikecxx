@@ -30,7 +30,7 @@ namespace Triangle {
 		}
 		return sum;
 	}
-	mpf_class cos_rads(mpf_class rads, long int acc)
+	mpf_class cos_rads(mpf_class rads, long int acc, bool ish)
 	{
 
 		return taylor_calc(rads, acc, [](long int c) {
@@ -40,17 +40,17 @@ namespace Triangle {
 				ret.push_back(i);	
 			}
 			return ret;
-		});
+		},ish);
 	}
-	mpf_class cos_deg(double deg, long int acc)
+	mpf_class cos_deg(double deg, long int acc, bool ish)
 	{
-		return cos_rads ( calc_rads(deg), acc);
+		return cos_rads ( calc_rads(deg), acc,ish);
 	}
-	mpf_class cos_deg(mpf_class deg, long int acc)
+	mpf_class cos_deg(mpf_class deg, long int acc, bool ish)
 	{
-		return cos_rads(deg, acc);
+		return cos_rads(deg, acc,ish);
 	}
-	mpf_class sin_rads(mpf_class rads, long int acc)
+	mpf_class sin_rads(mpf_class rads, long int acc, bool ish)
 	{
 		auto odds = [](long int c)
 		{
@@ -61,17 +61,17 @@ namespace Triangle {
 			}
 			return ret;
 		};
-		return taylor_calc(rads, acc, odds);
+		return taylor_calc(rads, acc, odds,ish);
 	
 	}
-	mpf_class sin_rads(double rads, long int acc)
+	mpf_class sin_rads(double rads, long int acc, bool ish)
 	{
 		return sin_rads(mpf_class{rads}, acc);
 	}
-	mpf_class sin_deg(double deg, long int acc)
+	mpf_class sin_deg(double deg, long int acc, bool ish)
 	{
 		mpf_class rads = calc_rads(deg); //= (deg * M_PI/180.0); // rad-x need. so for calculate we need radians from degree
 //		std::cout << "rads:" << rads << std::endl;
-		return sin_rads(rads, acc);
+		return sin_rads(rads, acc,ish);
 	}
 };

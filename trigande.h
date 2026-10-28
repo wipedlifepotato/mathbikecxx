@@ -17,12 +17,12 @@ namespace Triangle {
 	 *	x - x^3/3! + x^5/5! ... acc is count of numbers that x%2 != 0 (Teylor)
 	 * */
 	mpf_class calc_rads(mpf_class deg);
-	mpf_class sin_rads(mpf_class rads, long int acc=4);
-	mpf_class sin_rads(double rads, long int acc=4);
-	mpf_class sin_deg(double deg, long int acc=4);
+	mpf_class sin_rads(mpf_class rads, long int acc=4, bool ish=false);
+	mpf_class sin_rads(double rads, long int acc=4, bool ish=false);
+	mpf_class sin_deg(double deg, long int acc=4, bool ish=false);
 	mpf_class taylor_calc(mpf_class rads, long int acc, std::function<std::vector<long int>(long int)> fun, bool ish = false);
-	mpf_class cos_rads(mpf_class rads, long int acc=4);
-	mpf_class cos_deg(double deg, long int acc=4);
-	mpf_class cos_deg(mpf_class deg, long int acc=4);
+	mpf_class cos_rads(mpf_class rads, long int acc=4, bool ish=false);
+	mpf_class cos_deg(double deg, long int acc=4, bool ish=false);
+	mpf_class cos_deg(mpf_class deg, long int acc=4, bool ish=false);
 };
 #endif
