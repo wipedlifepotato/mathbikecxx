@@ -20,7 +20,7 @@ namespace Triangle {
 	mpf_class sin_rads(mpf_class rads, long int acc=4);
 	mpf_class sin_rads(double rads, long int acc=4);
 	mpf_class sin_deg(double deg, long int acc=4);
-	mpf_class taylor_calc(mpf_class rads, long int acc, std::function<std::vector<long int>(long int)> fun);
+	mpf_class taylor_calc(mpf_class rads, long int acc, std::function<std::vector<long int>(long int)> fun, bool ish = false);
 	mpf_class cos_rads(mpf_class rads, long int acc=4);
 	mpf_class cos_deg(double deg, long int acc=4);
 	mpf_class cos_deg(mpf_class deg, long int acc=4);

@@ -11,7 +11,7 @@ namespace Triangle {
 		mpf_class rads = (deg*M_PI/180.0);
 		return rads;
 	}
-	mpf_class taylor_calc(mpf_class rads, long int acc, std::function<std::vector<long int>(long int)> fun)
+	mpf_class taylor_calc(mpf_class rads, long int acc, std::function<std::vector<long int>(long int)> fun, bool ish) 
 	{
    	        mpf_class sum = 0.0;
 		int step=0;
@@ -22,7 +22,7 @@ namespace Triangle {
 
 			mpf_class pow{};
 			mpf_pow_ui(pow.get_mpf_t(), rads.get_mpf_t(), n);
-			if(step % 2 == 0)
+			if(step % 2 == 0 || ish)
 			 sum += (pow/factorial);
 			else 
 			 sum -= (pow/factorial);
