@@ -1,6 +1,7 @@
 #include<iostream>
 #include"trigande.h"
 #include<sstream>
+#include"alberthofman.h"
 int main(int argc, char** argv, char **env)
 {
 	// sinus
@@ -42,4 +43,22 @@ int main(int argc, char** argv, char **env)
             if (h_cos.str().substr(0, 4) != "1.19" || h_sin.str().substr(0, 4) != "0.64")
                 throw std::runtime_error("Hyperbolic math is broken");
         }
+
+	{
+		auto p = DiffiHofman::random_n();
+		auto g = DiffiHofman::random_n(128);
+		auto alice = DiffiHofman{p,g};
+		auto bob = DiffiHofman{p,g};
+		//
+		auto alicePubKey = alice.getPublicKey();
+		auto bobPubKey = bob.getPublicKey();
+		//
+		auto sharedKeyAlice = alice.getSharedKey(bobPubKey);
+		auto sharedKeyBob = bob.getSharedKey(alicePubKey);
+
+		std::cout << "shared key of Alice: " << sharedKeyAlice << std::endl;
+		std::cout << "~~~~~~~~~~~~~~~~~~~~~~" << std::endl;
+		std::cout << "shared key of Bob: " << sharedKeyBob << std::endl;
+
+	}
 }
