@@ -11,6 +11,8 @@
 
 //#include "I2PEndian.h"
 #include "ChaCha20.h"
+#include <endian.h>
+
 namespace i2p
 {
 namespace crypto
@@ -87,14 +89,14 @@ void Chacha20Init (Chacha20State& state, const uint8_t * nonce, const uint8_t * 
 	for (size_t i = 0; i < 8; i++)
 		state.data[4 + i] = chacha::u8t32le(key + i * 4);
 
-	state.data[12] = my_htole32 (counter);
+	state.data[12] = htole32 (counter);
 	for (size_t i = 0; i < 3; i++)
 		state.data[13 + i] = chacha::u8t32le(nonce + i * 4);
 }
 
 void Chacha20SetCounter (Chacha20State& state, uint32_t counter)
 {
-	state.data[12] = my_htole32 (counter);
+	state.data[12] = htole32 (counter);
 	state.offset = 0;
 }
 
