@@ -78,6 +78,11 @@ void block (Chacha20State &input, int rounds)
 	input.block << x;
 }
 
+#ifdef __linux__
+#include <endian.h>
+#else
+#endif
+inline uint32_t le32(uint32_t x){ return x; }
 void Chacha20Init (Chacha20State& state, const uint8_t * nonce, const uint8_t * key, uint32_t counter)
 {
 	state.data[0] = 0x61707865;
@@ -87,14 +92,22 @@ void Chacha20Init (Chacha20State& state, const uint8_t * nonce, const uint8_t * 
 	for (size_t i = 0; i < 8; i++)
 		state.data[4 + i] = chacha::u8t32le(key + i * 4);
 
-	state.data[12] = my_htole32 (counter);
+#ifdef htole32
+	state.data[12] = htole32(counter);
+#else
+	state.data[12] = counter;
+#endif
 	for (size_t i = 0; i < 3; i++)
 		state.data[13 + i] = chacha::u8t32le(nonce + i * 4);
 }
 
 void Chacha20SetCounter (Chacha20State& state, uint32_t counter)
 {
-	state.data[12] = my_htole32 (counter);
+#ifdef htole32
+	state.data[12] = htole32(counter);
+#else
+	state.data[12] = counter;
+#endif
 	state.offset = 0;
 }
 

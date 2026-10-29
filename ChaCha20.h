@@ -13,7 +13,7 @@
 #include <inttypes.h>
 #include <string.h>
 //#include "Crypto.h"
-#include"portable_endian.h"
+//#include"portable_endian.h"
 namespace i2p
 {
 namespace crypto
