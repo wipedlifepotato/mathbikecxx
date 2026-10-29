@@ -11,6 +11,7 @@ namespace Triangle {
 		mpf_class rads = (deg*M_PI/180.0);
 		return rads;
 	}
+	// for sinus all odds numbers. for cos all even numbers
 	mpf_class taylor_calc(mpf_class rads, long int acc, std::function<std::vector<long int>(long int)> fun, bool ish) 
 	{
    	        mpf_class sum = 0.0;
@@ -18,11 +19,11 @@ namespace Triangle {
 		for( auto n : fun(acc) )
 		{
 			mpz_class factorial{};
-			mpz_fac_ui(factorial.get_mpz_t(), n);
+			mpz_fac_ui(factorial.get_mpz_t(), n);// factorial of n
 
 			mpf_class pow{};
-			mpf_pow_ui(pow.get_mpf_t(), rads.get_mpf_t(), n);
-			if(step % 2 == 0 || ish)
+			mpf_pow_ui(pow.get_mpf_t(), rads.get_mpf_t(), n); // rads^n to variable pow. 
+			if(step % 2 == 0 || ish) // for sinux + - + - + - + -; for sinh + ++ + ++ ++ +; fox cos -+-+-+; fox cosh +++++++++
 			 sum += (pow/factorial);
 			else 
 			 sum -= (pow/factorial);
