@@ -1,10 +1,14 @@
 #include"alberthofman.h"
+#include<iostream>
 DiffiHofman::DiffiHofman(const mpz_class p, const mpz_class g) : p(p), g(g)
 {
 	int result = mpz_probab_prime_p(p.get_mpz_t(), 25);
 	//int result1 = mpz_probab_prime_p(g.get_mpz_t(), 25);
 	if (result == 0)
 		throw std::runtime_error("p is not prime");
+	std::cout << "DiffiHofman is initialized with p,g" << std::endl;
+	std::cout << p<< std::endl;
+	std::cout << g << std::endl;
 }
 
 mpz_class DiffiHofman::random_n(unsigned long num_bits)
@@ -23,9 +27,12 @@ mpz_class DiffiHofman::random_n(unsigned long num_bits)
 
 	mpz_class prime_p;
 	mpz_nextprime(prime_p.get_mpz_t(), start_num.get_mpz_t());
-	if ( mpz_probab_prime_p(prime_p.get_mpz_t(), 25) == 2 )
+	if ( mpz_probab_prime_p(prime_p.get_mpz_t(), 25) >= 1 )
 	{
+		std::cout << "Return prime number" << prime_p << std::endl;
 		return prime_p;
+	} else {
+		std::cout << "repeat try to get absolutic prime number" << std::endl;
 	}
 	}
         //while(true)	
@@ -56,6 +63,8 @@ mpz_class DiffiHofman::getPublicKey(unsigned long secret_bits)
     x = rand_gen.get_z_bits(secret_bits);
 
     mpz_powm(A.get_mpz_t(), g.get_mpz_t(), x.get_mpz_t(), p.get_mpz_t());
+    std::cout << "We get public Key: " << A << std::endl;
+    std::cout << "We get private Key: " << x << std::endl;
     return A;
 }
 
@@ -63,6 +72,7 @@ mpz_class DiffiHofman::getSharedKey(mpz_class B)
 {
 	mpz_class shared_key;
 	mpz_powm(shared_key.get_mpz_t(), B.get_mpz_t(), x.get_mpz_t(), p.get_mpz_t());
+        std::cout << "We get shared Key: " << shared_key << std::endl;
 	return shared_key;
 }
 
