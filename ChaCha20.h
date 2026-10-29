@@ -13,7 +13,7 @@
 #include <inttypes.h>
 #include <string.h>
 //#include "Crypto.h"
-#include"portable_endian.h"
+//#include"portable_endian.h"// а то слоп ломается не понимает прикола слишком сложное пиздец для него ситуация странная 
 namespace i2p
 {
 namespace crypto
