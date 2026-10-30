@@ -3,14 +3,66 @@
 #include<sstream>
 #include"alberthofman.h"
 #include"i2psam/i2psam.h"
+#include<thread>
+void clientThread(std::string dest) 
+{
+	    SAM::StreamSession session("TestClientSession",  "127.0.0.1", 7656  );
+	    if(session.isSick())
+	    {
+		std::cerr << "Can't create session" << std::endl;
+		exit(1);
+	    }
+	    auto lookupResult = session.namingLookup(dest);
+	    auto result = session.connect(lookupResult.value, false);
+	    // auto conn = result.value.get() ... conn-> write
+	    if (!result.isOk || !result.value) {        std::cerr << "Can't connect to server\n";        exit(1);    }
+	    auto& stream = *result.value;
+	    while(true)
+	    {
+	     stream.write("EXIT");
+	     std::cout << "CLIENT: " << stream.read() << std::endl;
+	     sleep(5);
+	    }
+
+}
 int main(int argc, char** argv, char **env)
 {
+	std::thread AcceptThread([](){
 	SAM::StreamSession session(
 			"TestSession",
 			"127.0.0.1",
 			7656
-			,"privkey"
+			//,"privkey"
 	);
+	if (session.isSick())
+	{
+		std::cerr << "Can't init session" << std::endl;
+		return 1;
+	}
+	std::cout << "SERVER DESTINATION: " << session.getMyDestination().pub << std::endl;
+	std::cout << "SERVER PRIVKEY: " << session.getMyDestination().priv << std::endl;
+	std::thread ClientThread(clientThread, session.getMyDestination().pub);
+	while(true)
+	{
+		auto result = session.accept(false);
+		if( !result.isOk || !result.value )
+		{
+			std::cerr << "Can't accept" << std::endl;
+			continue;
+		}
+		auto & stream = *result.value;
+
+		const std::string message = stream.read();
+		std::cout << "SERVER: " << message << std::endl;
+		stream.write("Pong: " + message);
+		if (message == "EXIT")
+		{
+			break;
+		}
+	}
+	return 0;
+	});
+	AcceptThread.join();
 	return 0;
 	// sinus
 	{
