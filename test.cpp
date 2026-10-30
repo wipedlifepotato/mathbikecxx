@@ -27,6 +27,8 @@ void clientThread(std::string dest)
 }
 int main(int argc, char** argv, char **env)
 {
+	// SAM 
+	{
 	std::thread AcceptThread([](){
 	SAM::StreamSession session(
 			"TestSession",
@@ -55,7 +57,7 @@ int main(int argc, char** argv, char **env)
 		const std::string message = stream.read();
 		std::cout << "SERVER: " << message << std::endl;
 		stream.write("Pong: " + message);
-		if (message == "EXIT")
+		if (message == "EXIT" || !message.length() )
 		{
 			break;
 		}
@@ -64,6 +66,8 @@ int main(int argc, char** argv, char **env)
 	});
 	AcceptThread.join();
 	return 0;
+	}
+	
 	// sinus
 	{
 	 std::ostringstream sin_deg_stream;
@@ -121,4 +125,5 @@ int main(int argc, char** argv, char **env)
 		std::cout << "shared key of Bob: " << sharedKeyBob << std::endl;
 
 	}
+
 }
