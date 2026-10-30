@@ -2,8 +2,16 @@
 #include"trigande.h"
 #include<sstream>
 #include"alberthofman.h"
+#include"i2psam/i2psam.h"
 int main(int argc, char** argv, char **env)
 {
+	SAM::StreamSession session(
+			"TestSession",
+			"127.0.0.1",
+			7656
+			,"privkey"
+	);
+	return 0;
 	// sinus
 	{
 	 std::ostringstream sin_deg_stream;

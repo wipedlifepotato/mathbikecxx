@@ -8,8 +8,8 @@ prepareSAM:
 lHofman: alberthofman.cpp alberthofman.h
 	g++ alberthofman.cpp -c -fpic -o alberthofman.o
 	g++ -shared -o libhofman.so alberthofman.o $(LIBS)
-Test: triangle.cpp test.cpp alberthofman.cpp
-	g++ triangle.cpp test.cpp alberthofman.cpp $(LIBS) -o test
+Test: prepareSAM
+	g++ trigande.cpp test.cpp alberthofman.cpp $(LIBS) -li2psam -Li2psam -o test
 lTrigande: trigande.cpp trigande.h
 	g++ trigande.cpp -c -fpic -o trigande.o
 	g++ -shared -o libtrigande.so trigande.o $(LIBS)
