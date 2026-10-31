@@ -5,7 +5,8 @@
 
 # Depeds
 - libgmp/libgmpxx (For BIGNUMBERS)
-- G++ compilator.
+- g++ compilator.
+- SAM Server (for a now with default port, in future on any port and host)
 
 # Tested
 - Linux
