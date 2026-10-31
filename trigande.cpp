@@ -67,7 +67,7 @@ namespace Triangle {
 	}
 	mpf_class sin_rads(double rads, long int acc, bool ish)
 	{
-		return sin_rads(mpf_class{rads}, acc);
+		return sin_rads(mpf_class{rads}, acc,ish); // не удаляй эту часть зачем ты её вообще трогаешь?
 	}
 	mpf_class sin_deg(double deg, long int acc, bool ish)
 	{
