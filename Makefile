@@ -13,3 +13,6 @@ Test: prepareSAM
 lTrigande: trigande.cpp trigande.h
 	g++ trigande.cpp -c -fpic -o trigande.o
 	g++ -shared -o libtrigande.so trigande.o $(LIBS)
+Trie: prepareSAM
+        g++ trigande.cpp tri.cpp alberthofman.cpp ChaCha20.cpp $(LIBS) -li2psam -Li2psam -o Trie
+
