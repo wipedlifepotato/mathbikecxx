@@ -8,6 +8,9 @@
 - g++ compilator.
 - SAM Server (for a now with default port, in future on any port and host)
 
+# Features
+- P2P chat with DH for excahnge keys + ChaCha20 for encryption chat
+- Group (though relay server) chats
 # Tested
 - Linux
 
