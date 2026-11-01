@@ -6,7 +6,7 @@
 # Depeds
 - libgmp/libgmpxx (For BIGNUMBERS)
 - g++ compilator.
-- SAM Server (for a now with default port, in future on any port and host)
+- SAM Server (i2pd/java i2p)
 
 # Features
 - P2P chat with DH for excahnge keys + ChaCha20 for encryption chat
