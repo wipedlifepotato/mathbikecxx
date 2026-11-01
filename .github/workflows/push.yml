@@ -33,7 +33,7 @@ jobs:
         with:
           usesh: true
           run: |
-            pkg_add gmp
+            pkg_add gmp gmake
             gmake Trie
 
   build-windows:
@@ -51,4 +51,5 @@ jobs:
           update: true
           install: git mingw-w64-x86_64-toolchain mingw-w64-x86_64-gmp make
       - name: Build Trie
-        run: make Trie
+        run: |
+          make Trie CXXFLAGS="-std=c++17 -pthread -Wall -Wextra -DWIN32"
