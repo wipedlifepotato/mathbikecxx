@@ -33,5 +33,5 @@ jobs:
           usesh: true
           run: |
             export PKG_PATH="https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/packages/$(uname -m)/"
-            pkg_add -I gmp gmake
+            pkg_add -I gmp gmake gmpxx
             gmake Trie CXX=clang++
