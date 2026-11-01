@@ -33,23 +33,5 @@ jobs:
         with:
           usesh: true
           run: |
-            pkg_add gmp gmake
+            pkg_add gmp gmake gcc
             gmake Trie
-
-  build-windows:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: git mingw-w64-x86_64-toolchain mingw-w64-x86_64-gmp make
-      - name: Build Trie
-        run: |
-          make Trie CXXFLAGS="-std=c++17 -pthread -Wall -Wextra -DWIN32"
