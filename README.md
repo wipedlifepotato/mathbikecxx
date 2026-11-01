@@ -11,6 +11,12 @@
 # Features
 - P2P chat with DH for excahnge keys + ChaCha20 for encryption chat
 - Group (though relay server) chats
+# Compilation
+- For linux install libgmp dev package also libgmpxx. for openbsd simillar. looks to make_openbsd.sh, before install though pkg_add gmp gmpxx
+- After run make. Like all.
+
+For a now it's can't be compiled an no posix system
+
 # Tested
 - Linux
 
