@@ -21,7 +21,6 @@ jobs:
           sudo apt-get install -y libgmp-dev build-essential
       - name: Build Trie
         run: make Trie
-
   build-openbsd:
     runs-on: ubuntu-latest
     steps:
@@ -33,5 +32,6 @@ jobs:
         with:
           usesh: true
           run: |
-            pkg_add gmp gmake g++
-            gmake Trie
+            export PKG_PATH="https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/packages/$(uname -m)/"
+            pkg_add -I gmp gmake
+            gmake Trie CXX=clang++
