@@ -33,5 +33,5 @@ jobs:
         with:
           usesh: true
           run: |
-            pkg_add gmp gmake gcc
+            pkg_add gmp gmake g++
             gmake Trie

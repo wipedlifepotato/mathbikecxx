@@ -26,56 +26,8 @@ jobs:
         with:
           name: bin-linux
           path: dist/
-
-  build-openbsd:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Build in OpenBSD VM
-        uses: vmactions/openbsd-vm@v1
-        with:
-          usesh: true
-          run: |
-            pkg_add gmp
-            gmake Trie
-      - name: Prepare artifact
-        run: |
-          mkdir -p dist
-          mv Trie dist/trigande-openbsd-amd64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-openbsd
-          path: dist/
-
-  build-windows:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: git mingw-w64-x86_64-toolchain mingw-w64-x86_64-gmp make
-      - name: Build Trie
-        run: make Trie
-      - name: Prepare artifact
-        run: |
-          mkdir -p dist
-          mv Trie.exe dist/trigande-windows-x86_64.exe
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-windows
-          path: dist/
-
   release:
-    needs: [build-linux, build-openbsd, build-windows]
+    needs: [build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -89,5 +41,3 @@ jobs:
         with:
           files: |
             artifacts/bin-linux/*
-            artifacts/bin-openbsd/*
-            artifacts/bin-windows/*
