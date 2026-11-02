@@ -6,3 +6,5 @@ test
 tri
 *.out
 Trie
+*.conf
+*.exe

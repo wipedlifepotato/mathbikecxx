@@ -1,104 +1,27 @@
-.github/workflow
-Сейчас под windows не компилируется так как много ошибок. Ты много POSIX добавил
-g++ -std=c++17 -pthread -Wall -Wextra -DWIN32   -c -o i2psam.o i2psam.cpp
-In file included from i2psam.cpp:17:
-i2psam.h: In function 'void SAM::print_error(const std::string&)':
-i2psam.h:77:44: warning: unused parameter 'err' [-Wunused-parameter]
-   77 | static void print_error(const std::string &err)
-      |                         ~~~~~~~~~~~~~~~~~~~^~~
-i2psam.cpp: In constructor 'SAM::SAMSession::SAMSession(const std::string&, const std::string&, uint16_t, const std::string&, const std::string&)':
-i2psam.cpp:217:24: warning: unused parameter 'signatureType' [-Wunused-parameter]
-  217 |     const std::string &signatureType /*= SAM_SIGNATURE_TYPE */)
-      |     ~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~
-ar -rv libi2psam.a i2psam.o
-D:\a\_temp\msys64\mingw64\bin\ar.exe: creating libi2psam.a
-a - i2psam.o
-make[1]: Leaving directory '/d/a/mathbikecxx/mathbikecxx/i2psam'
-g++ -std=c++17 -pthread -Wall -Wextra -DWIN32 -I. -Isrc trigande.cpp tri.cpp src/config.cpp src/common/util.cpp src/common/crypto.cpp src/common/frame.cpp src/common/handshake.cpp src/client/peer.cpp src/client/client.cpp src/server/relay.cpp alberthofman.cpp ChaCha20.cpp -lgmp -lgmpxx -li2psam -Li2psam -o Trie
-In file included from tri.cpp:25:
-i2psam/i2psam.h: In function 'void SAM::print_error(const std::string&)':
-i2psam/i2psam.h:77:44: warning: unused parameter 'err' [-Wunused-parameter]
-   77 | static void print_error(const std::string &err)
-      |                         ~~~~~~~~~~~~~~~~~~~^~~
-tri.cpp: In function 'void {anonymous}::daemonize(const std::string&)':
-tri.cpp:125:19: error: '::fork' has not been declared
-  125 |     pid_t pid = ::fork();
-      |                   ^~~~
-tri.cpp:134:11: error: '::setsid' has not been declared; did you mean 'getpid'?
-  134 |     if (::setsid() < 0)
-      |           ^~~~~~
-      |           getpid
-tri.cpp:137:13: error: '::fork' has not been declared
-  137 |     pid = ::fork();
-      |             ^~~~
-tri.cpp: In function 'int main(int, char**)':
-tri.cpp:447:5: error: 'sigset_t' was not declared in this scope; did you mean '_sigset_t'?
-  447 |     sigset_t stopSignals;
-      |     ^~~~~~~~
-      |     _sigset_t
-tri.cpp:448:18: error: 'stopSignals' was not declared in this scope
-  448 |     sigemptyset(&stopSignals);
-      |                  ^~~~~~~~~~~
-tri.cpp:448:5: error: 'sigemptyset' was not declared in this scope
-  448 |     sigemptyset(&stopSignals);
-      |     ^~~~~~~~~~~
-tri.cpp:449:5: error: 'sigaddset' was not declared in this scope
-  449 |     sigaddset(&stopSignals, SIGINT);
-      |     ^~~~~~~~~
-tri.cpp:451:5: error: 'sigprocmask' was not declared in this scope
-  451 |     sigprocmask(SIG_BLOCK, &stopSignals, nullptr);
-      |     ^~~~~~~~~~~
-tri.cpp:452:17: error: 'SIGPIPE' was not declared in this scope; did you mean 'SIGFPE'?
-  452 |     std::signal(SIGPIPE, SIG_IGN);
-      |                 ^~~~~~~
-      |                 SIGFPE
-tri.cpp: In lambda function:
-tri.cpp:459:22: error: 'stopSignals' is not captured
-  459 |         if (sigwait(&stopSignals, &sig) != 0)
-      |                      ^~~~~~~~~~~
-tri.cpp:457:66: note: the lambda has no capture-default
-  457 |     std::thread signalThread([&clientPtr, &serverPtr, stopSignals]() {
-      |                                                                  ^
-tri.cpp:448:18: note: '<typeprefixerror>stopSignals' declared here
-  448 |     sigemptyset(&stopSignals);
-      |                  ^~~~~~~~~~~
-tri.cpp:459:13: error: 'sigwait' was not declared in this scope
-  459 |         if (sigwait(&stopSignals, &sig) != 0)
-      |             ^~~~~~~
-src/common/util.cpp:11:10: fatal error: termios.h: No such file or directory
-   11 | #include <termios.h>
-      |          ^~~~~~~~~~~
-compilation terminated.
-In file included from src/client/peer.h:13,
-                 from src/client/peer.cpp:1:
-./i2psam/i2psam.h: In function 'void SAM::print_error(const std::string&)':
-./i2psam/i2psam.h:77:44: warning: unused parameter 'err' [-Wunused-parameter]
-   77 | static void print_error(const std::string &err)
-      |                         ~~~~~~~~~~~~~~~~~~~^~~
-In file included from src/client/client.h:13,
-                 from src/client/client.cpp:1:
-./i2psam/i2psam.h: In function 'void SAM::print_error(const std::string&)':
-./i2psam/i2psam.h:77:44: warning: unused parameter 'err' [-Wunused-parameter]
-   77 | static void print_error(const std::string &err)
-      |                         ~~~~~~~~~~~~~~~~~~~^~~
+Нужно добавить механизм защиты от флуда.
+Например, есть атакующий А.
+Есть жертва Б.
+А подключается Б по известному или найденому адресу
+Конечно же А сейчас принимает Б. Данное нужно добавить в виде опции AutoAccept 
+Если AutoAccept есть то принимает
+Если нет, то должна появиться заявка, которая автоматически через 30-60 секунд или другое время секунд через WaitAcceptTimeSec опцию ждет
+Далее. Если всё же А принял Б автоматически, должны стоять параметры Анти-флуда
+Если А начинает слать Б много повторяющихся сообщений разом - кик
+Если А начинает слать много мусора разом - кик
+Если А начинает слать множество запросов на DH - кик (по опциям это всё сколько мусора за раз сколько повторяющихся сообщений итд)
+Потом бантайм с ростом. Например сначала бан 1 минута, потом 2 потом 4 потом 8 и тд но если число уже большое в минутах то уже банить на 24 часа просто напросто
+Потом /banlist /delban команда 
+Потом возможность забанить самому /ban *DESTINATION*
+Что бы память не засорять особо, можно иметь предел допустим сколько то мегабайтов на баны и дальше просто переставать отвечать людям какое то время с предупреждением что идет целенаправленная атака и по возможности сменить Destination
 
-==
-Потом когда поправишь это, нужно будет поправить файлы .github/workflows/ 
-push.yml на любой коммит/pull request -> windows, linux, openbsd. Optional: MacOS (но нафиг не обязателен)
-release.yml на любой тэг реагирует и сразу грузит релиз файлы в релиз на github.
-С другой стороны и WINDOWS не обязателен. Более того - вреден. (обдумать самому)
-UPDATE: windows НЕ НУЖЕН. MACOS НЕ НУЖЕН
-Более того эта программа должна компилироваться только под Linux/OpenBSD/FreeBSD/Haiku OS. остальное запрещено.
-Сборка должна идти под Debian подобные дистры с разными версиями glibc. но сильное старые не разрешены. Где явно уязвимости - в топку
-Под разные диструбутивы Fedora подобные тоже можно.
-Сразу можно rpm/deb грузить/appimage
-OpenBSD бинарник не обязательно делать, достаточно просто проверить. FreeBSD тоже
-HaikuOS не обязательно вообще проверять. Если под линукс собралось, то с высокой долей вероятностью и на хайке соберется
+Потом /contacts 
+Добавить удалить и тд
+При этом сохраняется вместе с Destination ключ по DH, он уже у нас есть или какая-то рандомная фраза-пароль 32 байтов (можно голые байты)
+Потом если Destination сменится давать предупреждение что кто то из контактов под новым Destination стучится
 
-UPDATE. github workflow push.yml отработал. То есть make_openbsd.sh корректно отрабатывает. 
-Тогда нам нужен только openbsd/linux. Любой тег / релиз сразу rpm/deb пакеты для нормальных дистров, новых с меньшей всего уязвимостью + appimage можно. Для openbsd можно просто бинарник, но там лучше пускай собирают кому нужно
-ещё можно добавить autoreconf, что бы configure делалось это всё. Так даже лучше будет. В целом и тогда можно будет делать первый релиз alpha
+Потом ещё защита от просто потока байтов. Если дешифрованный текст явно содержит байты какие то а не осмысленный текст типа 0-вого байта то обрывать сразу. Вообще всё что входит в символы которые НИКОГДА не используют (utf-8 не считается и подобные кодировки) -> кик. То есть определенные char байты только не все. типа 0-вого 1-вого и других. Управляющие всякие байты сразу кик. Остальные пока не баним лучше. 
 
-ПЕред важными изменениями ВСЕГДА ОСТАНАВЛИВАЙСЯ И СПРАШИВАЙ МЕНЯ. Я могу не всегда успеть за твоей работой, ты много пишешь рассуждений, некоторое пропускается. Перед каждым изменением запрашивай меня разрешение и кратко пиши что ты хочешь, а не делай, а потом лови промпт что бы поправить изменение. Так будет лучше.
+Потом защита от атаки в виде разных быстрых сообщений. Если происходит постоянная быстрая отправка сообщений, то в какой то момент выдавать предупреждение, а в какой то если таких участников становится 2 и более просто кикать их начинать.
 
-Если под windows не критично сделать сборку, то делай, но добавь жирный #WARNING при компиляции и при запуске программы что это не безопасно вооооообще, так же под MacOS если будешь делать
+Потом можно предложить механизм смены Destination для контактов. /reidentity.
+Типа, отсылается всем contacts в сети, вот мой новый Destination приватного ключа и как только все ответили из всех возможных менять destination и на том проводе и уних что бы менялось и после этого смена приватного ключа и переподключение или переоткрытие клиента выход с клиента так проще и дальше включение и все контакты должны не автоматически подключаться а через команнду /contacts connectall например или /contacts connect 1 / contacts connect nick ... и тд
