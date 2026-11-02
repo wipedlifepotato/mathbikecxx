@@ -1,0 +1,33 @@
+name: trigande
+arch: amd64
+platform: linux
+version: "__VERSION__"
+release: "1"
+section: net
+priority: optional
+maintainer: Trigande maintainers
+vendor: Trigande
+homepage: https://github.com/wipedlifepotato/mathbikecxx
+license: NOASSERTION
+description: |
+  Encrypted peer-to-peer and relay chat over I2P with SAM.
+  The config file is encrypted at rest and the process runs inside a
+  platform sandbox (Landlock + seccomp on Linux, unveil + pledge on OpenBSD).
+contents:
+  - src: dist/trigande
+    dst: /usr/bin/trigande
+    file_info:
+      mode: 0755
+  - src: README.md
+    dst: /usr/share/doc/trigande/README.md
+  - src: usage.md
+    dst: /usr/share/doc/trigande/usage.md
+overrides:
+  deb:
+    depends:
+      - libgmp10
+      - libstdc++6
+  rpm:
+    depends:
+      - gmp
+      - libstdc++

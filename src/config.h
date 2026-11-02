@@ -15,6 +15,13 @@ struct Config
 {
     std::string path;
 
+    /*
+     * Password used to encrypt this file at rest.  It is never written into
+     * the file itself and is not the relay chat password.
+     */
+    std::string configPassword;
+    bool configEncrypted = false;
+
     std::string nick;
     std::string privateKey;
 
@@ -32,6 +39,7 @@ struct Config
 
     bool serverMode = false;
     bool daemonMode = false;
+    bool sandboxEnabled = true;
     unsigned relayVersion = 2;
     unsigned relayLimit = 64;
     bool relayAnonymous = false;
@@ -43,13 +51,19 @@ enum class LoadResult
 {
     Ok,
     Missing,
+    NeedsPassword,
     Error
 };
 
 Config defaultConfig();
 std::string defaultConfigPath(const char* argv0);
 
-LoadResult loadConfig(const std::string& path, Config& cfg, std::string& err);
-bool saveConfig(const Config& cfg, std::string& err);
+/* Returns NeedsPassword when the file is encrypted and password is empty. */
+LoadResult loadConfig(const std::string& path, const std::string& password,
+                      Config& cfg, std::string& err);
+bool saveConfig(Config& cfg, std::string& err);
+
+/* True when the file starts with the encrypted-config marker. */
+bool configIsEncrypted(const std::string& path);
 
 } // namespace TriMessage

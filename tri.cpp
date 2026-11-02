@@ -14,20 +14,31 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <getopt.h>
 #include <iostream>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include "i2psam/i2psam.h"
 
 #include "config.h"
+#include "common/platform.h"
 #include "common/util.h"
+#include "security/sandbox.h"
 #include "client/client.h"
 #include "server/relay.h"
+
+#if defined(_WIN32) || defined(__APPLE__)
+#warning "TriMessage: this platform build is NOT fully isolated. Use it only for testing; Linux/OpenBSD are the supported secure targets."
+#endif
 
 using namespace TriMessage;
 
@@ -45,7 +56,10 @@ enum
     OptRelayLimit,
     OptAnonymous,
     OptNoAskPlain,
-    OptPassword
+    OptPassword,
+    OptConfigPassword,
+    OptNoConfigPassword,
+    OptNoSandbox
 };
 
 void printUsage(const char* argv0)
@@ -78,10 +92,15 @@ void printUsage(const char* argv0)
         << "\n"
         << "Other:\n"
         << "  -c, --config <path>        config file (default: next to the binary)\n"
+        << "      --config-password <p>  password that encrypts the config file\n"
+        << "      --no-config-password   store the config in plaintext\n"
+        << "      --no-sandbox           disable local process isolation\n"
         << "  -h, --help                 this help\n"
         << "\n"
         << "The config file is created on the first run.  It stores the private\n"
-        << "key, nickname, SAM settings and all of the options above.\n";
+        << "key, nickname, SAM settings and all of the options above.  If a TTY\n"
+        << "is available, the first run asks for a password and encrypts it.\n"
+        << "The relay chat password (--password) is a different secret.\n";
 }
 
 bool generatePrivateKey(Config& cfg)
@@ -109,7 +128,7 @@ bool generatePrivateKey(Config& cfg)
     }
 }
 
-bool persistConfig(const Config& cfg)
+bool persistConfig(Config& cfg)
 {
     std::string err;
     if (!saveConfig(cfg, err))
@@ -120,8 +139,14 @@ bool persistConfig(const Config& cfg)
     return true;
 }
 
-void daemonize(const std::string& logPath)
+void daemonize(const std::string& logPath, const std::string& appDir)
 {
+#if defined(_WIN32)
+    (void)logPath;
+    (void)appDir;
+    std::cerr << "warning: --daemon is not supported on Windows; "
+                 "continuing in the foreground" << std::endl;
+#else
     pid_t pid = ::fork();
     if (pid < 0)
     {
@@ -141,7 +166,7 @@ void daemonize(const std::string& logPath)
         std::_Exit(0);
 
     ::umask(027);
-    ::chdir("/");
+    ::chdir(appDir.c_str());
 
     const int logFd = ::open(logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (logFd >= 0)
@@ -159,7 +184,46 @@ void daemonize(const std::string& logPath)
         if (nullFd > STDIN_FILENO)
             ::close(nullFd);
     }
+#endif
 }
+
+bool isAbsolutePath(const std::string& path)
+{
+#if defined(_WIN32)
+    if (path.size() >= 2 &&
+        ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':')
+        return true;
+    if (path.size() >= 2 &&
+        (path[0] == '\\' || path[0] == '/') &&
+        (path[1] == '\\' || path[1] == '/'))
+        return true;
+    return false;
+#else
+    return !path.empty() && path[0] == '/';
+#endif
+}
+
+std::atomic<Client*> g_clientPtr{nullptr};
+std::atomic<RelayServer*> g_serverPtr{nullptr};
+
+#if defined(_WIN32)
+BOOL WINAPI consoleCtrlHandler(DWORD type)
+{
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
+        type == CTRL_CLOSE_EVENT || type == CTRL_SHUTDOWN_EVENT)
+    {
+        if (Client* client = g_clientPtr.load())
+            client->ShutdownNow();
+        else if (RelayServer* server = g_serverPtr.load())
+            server->ShutdownNow();
+        else
+            ::_Exit(0);
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif
 
 } // namespace
 
@@ -171,6 +235,7 @@ int main(int argc, char** argv)
     std::string optPriv;
     std::string optSession;
     std::string optPassword;
+    std::string optConfigPassword;
     int optPort = -1;
     unsigned optDhBits = 0;
     unsigned optGroupBits = 0;
@@ -185,6 +250,9 @@ int main(int argc, char** argv)
     bool optAnonymous = false;
     bool optNoAskPlain = false;
     bool havePassword = false;
+    bool haveConfigPassword = false;
+    bool optNoConfigPassword = false;
+    bool optNoSandbox = false;
 
     static const option longOptions[] = {
         {"help", no_argument, nullptr, 'h'},
@@ -207,6 +275,9 @@ int main(int argc, char** argv)
         {"no-ask-plain", no_argument, nullptr, OptNoAskPlain},
         {"password", required_argument, nullptr, OptPassword},
         {"relay-password", required_argument, nullptr, OptPassword},
+        {"config-password", required_argument, nullptr, OptConfigPassword},
+        {"no-config-password", no_argument, nullptr, OptNoConfigPassword},
+        {"no-sandbox", no_argument, nullptr, OptNoSandbox},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -276,6 +347,16 @@ int main(int argc, char** argv)
                 optPassword = optarg;
                 havePassword = true;
                 break;
+            case OptConfigPassword:
+                optConfigPassword = optarg;
+                haveConfigPassword = true;
+                break;
+            case OptNoConfigPassword:
+                optNoConfigPassword = true;
+                break;
+            case OptNoSandbox:
+                optNoSandbox = true;
+                break;
             default:
                 printUsage(argv[0]);
                 return 2;
@@ -294,12 +375,101 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    const std::string configPath =
-        optConfigPath.empty() ? defaultConfigPath(argv[0]) : optConfigPath;
+    const std::string appDir = executableDir(argv[0]);
+    std::string configPath = optConfigPath.empty()
+                                 ? joinPath(appDir, "trigande.conf")
+                                 : optConfigPath;
+    if (!isAbsolutePath(configPath))
+        configPath = joinPath(appDir, configPath);
+
+    if (!setWorkingDirectory(appDir))
+        std::cerr << "warning: can't chdir to " << appDir << std::endl;
+
+    const bool configExisted = fileExists(configPath);
+    const bool configWasEncrypted = configExisted && configIsEncrypted(configPath);
+
+    if (haveConfigPassword && optNoConfigPassword)
+    {
+        std::cerr << "--config-password and --no-config-password are mutually "
+                     "exclusive" << std::endl;
+        return 2;
+    }
+    if (optNoConfigPassword && configWasEncrypted)
+    {
+        std::cerr << "config is encrypted; --no-config-password cannot decrypt it. "
+                     "Use --config-password, or /settings config_password - to "
+                     "store it as plaintext." << std::endl;
+        return 1;
+    }
+
+    std::string configPassword;
+    if (optNoConfigPassword)
+    {
+        configPassword.clear();
+    }
+    else if (haveConfigPassword)
+    {
+        configPassword = optConfigPassword;
+    }
+    else if (const char* envPassword = std::getenv("TRIGANDE_CONFIG_PASSWORD"))
+    {
+        configPassword = envPassword;
+    }
+    else if (configWasEncrypted)
+    {
+        if (!isInteractiveStdin())
+        {
+            std::cerr << "config is encrypted; set TRIGANDE_CONFIG_PASSWORD or "
+                         "use --config-password" << std::endl;
+            return 1;
+        }
+        if (!askPassword("config password for " + configPath + ": ", configPassword))
+            return 1;
+    }
+    else if (!configExisted && isInteractiveStdin())
+    {
+        std::cout << "The config file contains your I2P private key.\n"
+                  << "It can be encrypted with a password (recommended).\n";
+        std::string first;
+        if (!askPassword("new config password (empty = no encryption): ", first))
+            return 1;
+        if (!first.empty())
+        {
+            std::string second;
+            if (!askPassword("repeat config password: ", second) || first != second)
+            {
+                secureWipe(first);
+                secureWipe(second);
+                std::cerr << "passwords do not match" << std::endl;
+                return 1;
+            }
+            secureWipe(second);
+            configPassword = first;
+        }
+        secureWipe(first);
+    }
+    else if (!configExisted)
+    {
+        std::cerr << "warning: no TTY; the new config will be stored without "
+                     "password encryption. Set TRIGANDE_CONFIG_PASSWORD to "
+                     "encrypt it." << std::endl;
+    }
 
     Config cfg;
     std::string loadErr;
-    const LoadResult loaded = loadConfig(configPath, cfg, loadErr);
+    LoadResult loaded = loadConfig(configPath, configPassword, cfg, loadErr);
+    if (loaded == LoadResult::NeedsPassword)
+    {
+        if (!isInteractiveStdin())
+        {
+            std::cerr << "config is encrypted; set TRIGANDE_CONFIG_PASSWORD or "
+                         "use --config-password" << std::endl;
+            return 1;
+        }
+        if (!askPassword("config password for " + configPath + ": ", configPassword))
+            return 1;
+        loaded = loadConfig(configPath, configPassword, cfg, loadErr);
+    }
     if (loaded == LoadResult::Error)
     {
         std::cerr << "config error: " << loadErr << std::endl;
@@ -307,6 +477,10 @@ int main(int argc, char** argv)
     }
     cfg.path = configPath;
     bool dirty = (loaded == LoadResult::Missing);
+
+    /* A password given for an existing plaintext file re-encrypts it now. */
+    if (loaded == LoadResult::Ok && !configPassword.empty() && !configWasEncrypted)
+        dirty = true;
 
     if (!optHost.empty())
     {
@@ -398,6 +572,12 @@ int main(int argc, char** argv)
         cfg.relayLimit = optRelayLimit;
         dirty = true;
     }
+    if (optNoSandbox)
+    {
+        /* Runtime-only override: do not persist it, so a debug run does not
+         * silently disable isolation forever. */
+        cfg.sandboxEnabled = false;
+    }
 
     const std::string originalNick = cfg.nick;
     cfg.nick = sanitizeNick(cfg.nick);
@@ -435,7 +615,39 @@ int main(int argc, char** argv)
     }
 
     if (cfg.serverMode && cfg.daemonMode)
-        daemonize(joinPath(executableDir(argv[0]), "trigande.log"));
+        daemonize(joinPath(appDir, "trigande.log"), appDir);
+
+#if defined(_WIN32) || defined(__APPLE__)
+    std::cerr
+        << "\n"
+        << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+        << "!! WARNING: this Windows/macOS build is NOT fully isolated.    !!\n"
+        << "!! Use Linux or OpenBSD for real work.                        !!\n"
+        << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+        << std::endl;
+#endif
+
+    if (cfg.sandboxEnabled)
+    {
+        SandboxOptions sandboxOptions;
+        sandboxOptions.enabled = true;
+        sandboxOptions.appDir = appDir;
+        sandboxOptions.configPath = configPath;
+        std::string sandboxErr;
+        if (!sandboxApply(sandboxOptions, sandboxErr))
+        {
+            std::cerr << "[!] sandbox failed: " << sandboxErr << std::endl;
+            std::cerr << "[!] refusing to run without isolation; use --no-sandbox "
+                         "only if you understand the risk" << std::endl;
+            return 1;
+        }
+        std::cout << "sandbox: " << sandboxPlatformName() << " active" << std::endl;
+    }
+    else
+    {
+        std::cerr << "[!] WARNING: sandbox is disabled; the process can access "
+                     "files and start programs" << std::endl;
+    }
 
     /*
      * Handle Ctrl+C/Ctrl+D as a normal shutdown so peers receive BYE instead
@@ -444,6 +656,9 @@ int main(int argc, char** argv)
      * the relay has been constructed, the same thread exits immediately so a
      * Ctrl+C during a slow SAM handshake does not hang the terminal.
      */
+#if defined(_WIN32)
+    ::SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+#else
     sigset_t stopSignals;
     sigemptyset(&stopSignals);
     sigaddset(&stopSignals, SIGINT);
@@ -451,37 +666,39 @@ int main(int argc, char** argv)
     sigprocmask(SIG_BLOCK, &stopSignals, nullptr);
     std::signal(SIGPIPE, SIG_IGN);
 
-    std::atomic<Client*> clientPtr{nullptr};
-    std::atomic<RelayServer*> serverPtr{nullptr};
-
-    std::thread signalThread([&clientPtr, &serverPtr, stopSignals]() {
+    std::thread signalThread([]() {
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGINT);
+        sigaddset(&signals, SIGTERM);
         int sig = 0;
-        if (sigwait(&stopSignals, &sig) != 0)
+        if (sigwait(&signals, &sig) != 0)
             return;
-        if (Client* client = clientPtr.load())
+        if (Client* client = g_clientPtr.load())
             client->ShutdownNow();
-        else if (RelayServer* server = serverPtr.load())
+        else if (RelayServer* server = g_serverPtr.load())
             server->ShutdownNow();
         else
             ::_exit(0);
     });
     signalThread.detach();
+#endif
 
     try
     {
         if (cfg.serverMode)
         {
             RelayServer server(cfg);
-            serverPtr.store(&server);
+            g_serverPtr.store(&server);
             server.Run();
-            serverPtr.store(nullptr);
+            g_serverPtr.store(nullptr);
         }
         else
         {
             Client client(cfg);
-            clientPtr.store(&client);
+            g_clientPtr.store(&client);
             client.Run();
-            clientPtr.store(nullptr);
+            g_clientPtr.store(nullptr);
         }
     }
     catch (const std::exception& e)

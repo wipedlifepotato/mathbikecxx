@@ -1,6 +1,7 @@
 #include "peer.h"
 
 #include "common/frame.h"
+#include "common/platform.h"
 #include "common/util.h"
 
 #include "alberthofman.h"
@@ -173,6 +174,42 @@ void Peer::shutdown()
     std::lock_guard<std::mutex> lk(m_writeMutex);
     if (m_sock)
         m_sock->close();
+}
+
+void Peer::wipeSecrets()
+{
+    {
+        std::lock_guard<std::mutex> lk(m_keyMutex);
+        secureZero(m_key.key.data(), m_key.key.size());
+        secureZero(m_key.iv.data(), m_key.iv.size());
+        secureZero(m_pendingKey.key.data(), m_pendingKey.key.size());
+        secureZero(m_pendingKey.iv.data(), m_pendingKey.iv.size());
+        m_key = KeyMaterial{};
+        m_pendingKey = KeyMaterial{};
+        m_hasKey = false;
+        m_hasPending = false;
+        m_pendingDh.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_infoMutex);
+        secureWipe(m_nickname);
+        secureWipe(m_destination);
+        secureWipe(m_fp);
+        secureWipe(m_myNick);
+        secureWipe(m_myFp);
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_historyMutex);
+        for (auto& line : m_history)
+            secureWipe(line);
+        m_history.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_pingMutex);
+        m_pendingPings.clear();
+    }
+    secureWipe(m_groupP);
+    secureWipe(m_groupG);
 }
 
 bool Peer::sendPing()

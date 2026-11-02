@@ -5,9 +5,15 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    name: Linux packages
+    # Ubuntu 22.04 keeps the release binary compatible with a reasonably
+    # recent glibc (2.35+) instead of the bleeding-edge runner image.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -15,29 +21,198 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgmp-dev build-essential
+          sudo apt-get install -y libgmp-dev build-essential file
       - name: Build Trie
         run: make Trie
-      - name: Prepare artifact
+      - name: Prepare binary and packages
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # RPM/Debian versions must not contain a plain dash in the version
+          # field; '~' keeps the alpha/beta ordering correct.
+          PKG_VERSION="${VERSION//-/\~}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
-          mv Trie dist/trigande-linux-x86_64
-      - uses: actions/upload-artifact@v4
+          strip Trie
+          cp Trie dist/trigande
+
+          # nFPM builds both .deb and .rpm from one description.
+          curl -sSL https://api.github.com/repos/goreleaser/nfpm/releases/latest \
+            | grep -o 'https://[^"]*Linux_x86_64.tar.gz' | head -1 \
+            | xargs curl -sSL -o nfpm.tgz
+          tar xzf nfpm.tgz nfpm
+          sed "s/__VERSION__/${PKG_VERSION}/" .github/nfpm.yaml > nfpm.yaml
+          ./nfpm package -f nfpm.yaml -p deb \
+            -t "dist/trigande_${PKG_VERSION}_amd64.deb"
+          ./nfpm package -f nfpm.yaml -p rpm \
+            -t "dist/trigande-${PKG_VERSION}-1.x86_64.rpm"
+
+      - name: Build AppImage
+        run: |
+          set -euo pipefail
+          APP=AppDir
+          mkdir -p "$APP/usr/bin" "$APP/usr/lib" \
+                   "$APP/usr/share/applications" \
+                   "$APP/usr/share/icons/hicolor/256x256/apps"
+          cp dist/trigande "$APP/usr/bin/trigande"
+
+          # Bundle everything except glibc itself; AppImage runs on the
+          # target distro and should not depend on its libstdc++/gmp versions.
+          ldd dist/trigande | awk '/=> \// {print $3}' | while read -r lib; do
+            case "$(basename "$lib")" in
+              libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|ld-linux*) ;;
+              *) cp -L "$lib" "$APP/usr/lib/" ;;
+            esac
+          done
+
+          cat > "$APP/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$HERE/usr/bin/trigande" "$@"
+          EOF
+          chmod +x "$APP/AppRun"
+
+          cat > "$APP/trigande.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Trigande
+          Comment=Encrypted I2P chat
+          Exec=trigande
+          Icon=trigande
+          Terminal=true
+          Categories=Network;Chat;
+          EOF
+          cp "$APP/trigande.desktop" "$APP/usr/share/applications/"
+
+          # Minimal valid PNG icon (1x1).
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' \
+            | base64 -d > "$APP/trigande.png"
+          cp "$APP/trigande.png" \
+             "$APP/usr/share/icons/hicolor/256x256/apps/trigande.png"
+
+          curl -sSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APP" \
+            "dist/Trigande-${VERSION}-x86_64.AppImage"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: bin-linux
+          name: linux-dist
           path: dist/
-  release:
-    needs: [build-linux]
+
+  build-openbsd:
+    name: OpenBSD binary
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build in OpenBSD VM
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            export PKG_PATH="https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/packages/$(uname -m)/"
+            pkg_add -I gmp gmpxx
+          run: |
+            /bin/ksh make_openbsd.sh
+            mkdir -p dist
+            cp Trie dist/trigande-openbsd-x86_64
+            cp README.md usage.md dist/
+      - name: Upload OpenBSD artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openbsd-dist
+          path: dist/
+          if-no-files-found: warn
+
+  build-windows:
+    name: Windows archive
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-gmp
+      - name: Build and package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          make prepareSAM
+          make Trie
+          mkdir -p dist
+          cp Trie.exe dist/trigande.exe
+          cp README.md usage.md dist/
+          cd dist
+          zip -r "trigande-${VERSION}-windows-x86_64.zip" \
+            trigande.exe README.md usage.md
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/
+
+  build-macos:
+    name: macOS archive
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: brew install gmp
+      - name: Build and package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          GMP="$(brew --prefix gmp)"
+          make prepareSAM
+          make Trie \
+            CXXFLAGS="-std=c++17 -pthread -Wall -Wextra -I$GMP/include" \
+            LIBS="-L$GMP/lib -lgmp -lgmpxx"
+          mkdir -p dist
+          cp Trie dist/trigande-macos
+          cp README.md usage.md dist/
+          tar -C dist -czf "dist/trigande-${VERSION}-macos.tar.gz" \
+            trigande-macos README.md usage.md
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/
+
+  release:
+    name: Publish release
+    needs: [build-linux, build-openbsd, build-windows, build-macos]
+    runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Create GitHub Release and Upload Assets
+      - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/bin-linux/*
+          files: artifacts/**/*
+          generate_release_notes: true

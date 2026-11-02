@@ -10,6 +10,7 @@ on:
 
 jobs:
   build-linux:
+    name: Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +22,11 @@ jobs:
           sudo apt-get install -y libgmp-dev build-essential
       - name: Build Trie
         run: make Trie
+      - name: Smoke test
+        run: ./Trie --help
+
   build-openbsd:
+    name: OpenBSD
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +36,55 @@ jobs:
         uses: vmactions/openbsd-vm@v1
         with:
           usesh: true
-          run: |
+          prepare: |
             export PKG_PATH="https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/packages/$(uname -m)/"
             pkg_add -I gmp gmpxx
+          run: |
             /bin/ksh make_openbsd.sh
+            ./Trie --help
+
+  build-windows:
+    name: Windows (MinGW, not fully isolated)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-gmp
+      - name: Build Trie.exe
+        run: |
+          make prepareSAM
+          make Trie
+      - name: Smoke test
+        run: ./Trie.exe --help
+
+  build-macos:
+    name: macOS (not fully isolated)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: brew install gmp
+      - name: Build Trie
+        run: |
+          GMP="$(brew --prefix gmp)"
+          make prepareSAM
+          make Trie \
+            CXXFLAGS="-std=c++17 -pthread -Wall -Wextra -I$GMP/include" \
+            LIBS="-L$GMP/lib -lgmp -lgmpxx"
+      - name: Smoke test
+        run: ./Trie --help

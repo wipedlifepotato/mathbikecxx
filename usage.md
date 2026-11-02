@@ -25,6 +25,15 @@ make Trie
 `trigande.cpp`, `alberthofman.cpp` и `ChaCha20.cpp`. Реализации тригонометрии и
 Diffie-Hellman не дублируются.
 
+Поддерживаемые платформы:
+
+- **Linux** — основная цель, sandbox на Landlock + seccomp;
+- **OpenBSD** — sandbox на unveil + pledge;
+- **Windows / macOS** — собираются, но при компиляции и запуске печатается
+  предупреждение: полноценной изоляции там нет, использовать только для
+  тестов. Для Windows нужен MSYS2/MinGW-w64 и `gmp`, для macOS — Homebrew
+  `gmp` (`make Trie` с `CXXFLAGS`/`LIBS` из `brew --prefix gmp`).
+
 ---
 
 ## 2. Быстрый старт (клиент)
@@ -37,7 +46,19 @@ Diffie-Hellman не дублируются.
 
 - если в нём нет `private_key`, ключ генерируется через SAM и сохраняется;
 - создаётся ник и имя SAM-сессии;
-- файл получает права `0600`.
+- файл получает права `0600`;
+- если есть терминал, программа предлагает задать пароль и шифрует конфиг
+  (рекомендуется). Пустой пароль оставляет файл открытым.
+
+Пароль можно задать и без вопроса:
+
+```bash
+./Trie --config-password 'мой пароль'
+TRIGANDE_CONFIG_PASSWORD='мой пароль' ./Trie
+```
+
+`--no-config-password` явно оставляет конфиг в plaintext. Пароль шифрования
+файла — **не** пароль relay-чата (`--password` / `relay_password`).
 
 В консоли появятся destination и fingerprint. Команда:
 
@@ -110,10 +131,16 @@ Diffie-Hellman не дублируются.
 | Опция | Что делает |
 |---|---|
 | `-c, --config <path>` | путь к конфигу |
+| `--config-password <p>` | пароль, которым шифруется конфиг |
+| `--no-config-password` | не шифровать конфиг (plaintext) |
+| `--no-sandbox` | отключить локальную изоляцию **только на этот запуск** |
 | `-h, --help` | справка |
 
-**Важно:** все опции не только применяются на этот запуск, но и записываются
-в конфиг. То есть `./Trie -H 10.0.0.5 -P 7657` сохранит новый адрес SAM.
+**Важно:** почти все опции не только применяются на этот запуск, но и
+записываются в конфиг. То есть `./Trie -H 10.0.0.5 -P 7657` сохранит новый
+адрес SAM. Исключения: `--config-password`, `--no-config-password` и
+`--no-sandbox` действуют только на текущий процесс, чтобы отладочный запуск
+не отключал sandbox навсегда.
 
 ---
 
@@ -124,6 +151,27 @@ Diffie-Hellman не дублируются.
 
 Формат — `key = value`, `#` — комментарий. Неизвестные ключи игнорируются.
 Запись атомарная: сначала `*.tmp`, потом `rename`, права `0600`.
+
+Если задан пароль, файл целиком шифруется:
+
+```text
+TRIGANDE-ENCRYPTED-CONFIG-V1
+version = 1
+kdf = pbkdf2-hmac-sha256
+iterations = 210000
+salt = <base64>
+nonce = <base64>
+hmac = <base64>
+data = <base64>
+```
+
+Используются PBKDF2-HMAC-SHA256 (210000 итераций), ChaCha20 и HMAC-SHA256 для
+проверки целостности. Неверный пароль даёт `wrong config password or damaged
+config`. Пароль нигде в файле не хранится.
+
+При запуске с зашифрованным конфигом программа спрашивает пароль, берёт его из
+`TRIGANDE_CONFIG_PASSWORD` или из `--config-password`. Если терминала нет и
+пароль не передан — запуск завершается ошибкой.
 
 | Ключ | Смысл |
 |---|---|
@@ -139,12 +187,14 @@ Diffie-Hellman не дублируются.
 | `rekey_secret_bits` | размер секрета при плановой смене ключа |
 | `max_peer_dh_bits` | порог предупреждения о большом DH у пира; `0` — не проверять |
 | `allow_huge_dh` | `true` — не спрашивать про большой DH |
+| `sandbox` | `true` — локальная изоляция процесса (по умолчанию) |
 | `server_mode` | `true` — запускать relay |
 | `daemon_mode` | `true` — уходить в фон (только для relay) |
 | `relay_version` | `2` — шифрованный relay, `3` — открытый |
 | `relay_limit` | максимум участников relay |
 | `relay_anonymous` | `true` — подменять fingerprint участников |
 | `relay_ask_plain` | `true` — спрашивать согласие перед relay v3 |
+| `relay_password` | пароль группы relay (не путать с паролем шифрования файла) |
 
 Пример:
 
@@ -164,6 +214,8 @@ rekey_secret_bits = 128
 max_peer_dh_bits = 8192
 allow_huge_dh = false
 
+sandbox = true
+
 server_mode = false
 daemon_mode = false
 relay_version = 2
@@ -174,7 +226,37 @@ relay_ask_plain = true
 
 `private_key` — это секрет. Не публикуйте файл и не передавайте его как
 «destination»: для подключения нужен только публичный destination из
-`/getMyPubKey`.
+`/getMyPubKey`. Если конфиг не зашифрован, любой, кто прочитал файл, получает
+ваш приватный ключ и пароль группы relay. Включите шифрование конфига.
+
+### Локальная изоляция (sandbox)
+
+По умолчанию `sandbox = true`. Если изоляцию не удалось установить, программа
+**отказывается работать**: лучше явная ошибка, чем тихий запуск без защиты.
+Отключить можно только осознанно:
+
+```bash
+./Trie --no-sandbox              # на один запуск
+/settings sandbox false          # сохранить в конфиг (не рекомендуется)
+```
+
+Что делает sandbox:
+
+- **Linux** — Landlock ограничивает файловую систему каталогом программы и
+  конфигом; seccomp запрещает `execve`, `fork`, `ptrace`, `mount`, `bpf`,
+  `io_uring`, загрузку модулей и другие опасные вызовы. Сеть остаётся
+  доступной для SAM и I2P.
+- **OpenBSD** — unveil даёт `rwc` только на файл конфига, `wc` на каталог
+  программы (для `*.tmp` + `rename` и лога), плюс минимум для
+  `/etc/hosts`, `/etc/resolv.conf`, `/dev/*`; pledge ограничивает системные
+  вызовы. Системные каталоги вроде `/usr` не открываются: библиотеки уже
+  загружены до установки sandbox.
+- **macOS / Windows** — частичная изоляция. При сборке и запуске печатается
+  предупреждение, что это небезопасно; для реальной работы используйте
+  Linux или OpenBSD.
+
+Sandbox устанавливается после `daemonize`, поэтому демон успевает открыть лог
+и сменить каталог.
 
 ---
 
@@ -193,6 +275,8 @@ relay_ask_plain = true
 | `/nick <name>` | сменить ник (сохраняется в конфиг) |
 | `/rekey [id\|nick]` | принудительно сменить DH-ключ |
 | `/settings [key value]` | показать или изменить настройки |
+| `/decodeconf`, `/conf`, `/showconf` | показать расшифрованный конфиг, секреты — `(hidden)` |
+| `/panic`, `/p` | разослать panic relay-пирам, стереть конфиг/секреты и выйти |
 | `/status` | состояние узла, пиры, relay-roster |
 | `/quit` | выход |
 
@@ -202,13 +286,32 @@ relay_ask_plain = true
 
 ### `/settings`
 
-Без аргументов показывает все настройки (приватный ключ скрыт). С аргументами:
+Без аргументов показывает все настройки. Секреты (`private_key`,
+`config_password`, `relay_password`) не печатаются, вместо них `(hidden)`.
+С аргументами:
 
 ```
 /settings nick bob
 /settings max_peer_dh_bits 4096
 /settings relay_limit 32
+/settings sandbox false
+/settings relay_password новый-пароль-группы
 ```
+
+Управление ключом и паролем файла:
+
+```
+/settings private_key <полный приватный destination>
+/settings private_key        # запросить ключ без эха
+/settings private_key -      # удалить ключ, новый сгенерируется при старте
+/settings config_password    # запросить новый пароль без эха и перешифровать
+/settings config_password -  # отключить шифрование, файл станет plaintext
+```
+
+`private_key` проверяется: принимается только корректный приватный I2P
+destination. После установки ключа нужен перезапуск. Старый ключ можно
+вернуть таким образом в любой момент — файл для этого сначала расшифровывается
+паролем при запуске.
 
 Что применяется сразу:
 
@@ -218,13 +321,37 @@ relay_ask_plain = true
 
 Что требует перезапуска:
 
-- `sam_host`, `sam_port`, `sam_session`, `sam_signature_type`;
+- `private_key`, `sam_host`, `sam_port`, `sam_session`, `sam_signature_type`;
+- `sandbox`;
 - `server_mode`, `daemon_mode`, `relay_version`, `relay_limit`,
   `relay_anonymous`, `relay_ask_plain`.
 
 `secret_bits` и `rekey_secret_bits` сохраняются и применяются к следующим
-рукопожатиям / смене ключа. `private_key` через `/settings` изменить нельзя —
-для нового ключа удалите конфиг.
+рукопожатиям / смене ключа. `config_password` перешифровывает файл сразу.
+
+### `/decodeconf`
+
+Показывает настройки из уже расшифрованного конфига. Это удобно, когда файл
+зашифрован и его нельзя просто открыть редактором. Секреты скрыты:
+
+```
+private_key = (set, hidden)
+config_password = (set, hidden)
+relay_password = (set, hidden)
+```
+
+### `/panic` и `/p`
+
+Аварийный выход:
+
+1. relay-пирам отправляется `USER IS PANICKED [BYE...]`;
+2. обычным direct-пирам panic не отправляется;
+3. соединения закрываются, ключи и буферы затираются;
+4. файл конфига перезаписывается случайными байтами и удаляется;
+5. процесс завершается.
+
+Используйте, если нужно срочно убрать ключи с диска. Восстановить конфиг после
+этого нельзя.
 
 ---
 
@@ -409,14 +536,17 @@ Relay-сервер делает такую же проверку для вход
 
 | Файл | Ответственность |
 |---|---|
-| `src/config.h/.cpp` | структура `Config`, значения по умолчанию, путь к конфигу, парсинг, валидация, атомарное сохранение `0600` |
+| `src/config.h/.cpp` | структура `Config`, значения по умолчанию, путь к конфигу, парсинг, валидация, шифрование PBKDF2/ChaCha20/HMAC, атомарное сохранение `0600` |
 | `src/common/protocol.h` | константы таймаутов, лимитов, heartbeat, истории |
+| `src/common/platform.h/.cpp` | переносимый слой: пути к бинарнику, `chdir`, TTY/пароль без эха, OS CSPRNG, безопасное затирание и удаление, атомарная замена файла |
+| `src/common/hash.h/.cpp` | SHA-256, HMAC-SHA256, PBKDF2-HMAC-SHA256 для шифрования конфига (без OpenSSL) |
 | `src/common/util.h/.cpp` | RNG, время, hex/base64, I2P-base64, fingerprint, анонимный fingerprint, нормализация destination, разбор приватного destination, пути, `askYesNo` |
 | `src/common/crypto.h/.cpp` | `mpzToBytes`, `deriveKey` (32-байтный ключ + 16-байтный IV), `makeProof`, nonce из строки |
 | `src/common/frame.h/.cpp` | кадр версии 2, padding через `trigande.cpp`, шифрование/расшифрование, plaintext-конверт `TRI2`, `makePlain`/`parsePlain` |
 | `src/common/handshake.h/.cpp` | `HELLO`/`HELLO_ACK`, поля `HsData`, кодирование/декодирование, транскрипт для `AUTH` |
-| `src/client/client.h/.cpp` | жизненный цикл клиента: SAM-сессия, приём и установка соединений, таблица команд, `/settings`, relay-roster, цикл ping/rekey |
-| `src/client/peer.h/.cpp` | одно соединение: сокет, отправка/приём кадров, ключи, ping/pong, `REKEY`, история сообщений |
+| `src/security/sandbox.h/.cpp` | локальная изоляция: Landlock+seccomp (Linux), unveil+pledge (OpenBSD), sandbox_init (macOS), job object + mitigations (Windows) |
+| `src/client/client.h/.cpp` | жизненный цикл клиента: SAM-сессия, приём и установка соединений, таблица команд, `/settings`, `/decodeconf`, `/panic`, relay-roster, цикл ping/rekey |
+| `src/client/peer.h/.cpp` | одно соединение: сокет, отправка/приём кадров, ключи, ping/pong, `REKEY`, история сообщений, `wipeSecrets()` |
 | `src/server/relay.h/.cpp` | relay-сервер: приём участников, DH на участника, рассылка ростера, пересылка чата, анонимизация, лимит, janitor, демон-лог |
 
 ### Поток данных
@@ -462,3 +592,19 @@ tri.cpp
 **Не создаётся ключ** — SAM недоступен. Для relay ключ обязателен: запустите
 SAM и повторите запуск. Для клиента без ключа сессия будет временной, но
 destination может быть непригоден для `/connect`.
+
+**`config is encrypted; password is required` / `wrong config password`** —
+задайте `TRIGANDE_CONFIG_PASSWORD`, `--config-password` или введите пароль в
+терминале. Пароль relay-чата здесь не подходит.
+
+**`sandbox failed` / `refusing to run without isolation`** — ядро не
+поддерживает Landlock/seccomp или sandbox-профиль macOS не собрался. На Linux
+проверьте ядро (Landlock с 5.13), на OpenBSD — версию. Для отладки можно
+запустить с `--no-sandbox`, но это снимает защиту.
+
+**`Can't init SAM stream session` после убийства клиента** — i2pd иногда
+держит старую SAM-сессию несколько секунд. Подождите или перезапустите i2pd.
+
+**Windows/macOS** — сборка работает, но при компиляции и запуске печатается
+жирное предупреждение: изоляция там частичная. Не используйте эти сборки для
+чувствительных ключей.

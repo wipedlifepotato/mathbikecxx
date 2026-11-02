@@ -3,6 +3,7 @@
 #include "common/frame.h"
 #include "common/handshake.h"
 #include "common/lines.h"
+#include "common/platform.h"
 #include "common/protocol.h"
 #include "common/util.h"
 
@@ -1045,6 +1046,8 @@ bool Client::CmdHelp(const ParamsT&)
     WriteMessage("/nick <name>          - change my nickname");
     WriteMessage("/rekey [id|nick]      - force a new DH exchange");
     WriteMessage("/settings [key value] - show or change persistent settings");
+    WriteMessage("/decodeconf           - show the decrypted config (secrets hidden)");
+    WriteMessage("/p, /panic            - broadcast panic to relays, wipe config and exit");
     WriteMessage("/status               - show local node state");
     WriteMessage("/quit                 - exit");
     WriteMessage("");
@@ -1121,6 +1124,10 @@ bool Client::CmdSettings(const ParamsT& params)
     if (params.empty())
     {
         WriteMessage("settings (" + m_config.path + "):");
+        WriteMessage("  config_encrypted = " +
+                     std::string(m_config.configEncrypted ? "true" : "false"));
+        WriteMessage("  config_password = " +
+                     std::string(m_config.configPassword.empty() ? "(not set)" : "(set, hidden)"));
         WriteMessage("  nick = " + m_config.nick);
         WriteMessage("  private_key = " +
                      std::string(m_config.privateKey.empty() ? "(not set)" : "(set, hidden)"));
@@ -1134,6 +1141,7 @@ bool Client::CmdSettings(const ParamsT& params)
         WriteMessage("  rekey_secret_bits = " + std::to_string(m_config.rekeySecretBits));
         WriteMessage("  max_peer_dh_bits = " + std::to_string(m_config.maxPeerDhBits));
         WriteMessage("  allow_huge_dh = " + std::string(m_config.allowHugeDh ? "true" : "false"));
+        WriteMessage("  sandbox = " + std::string(m_config.sandboxEnabled ? "true" : "false"));
         WriteMessage("  server_mode = " + std::string(m_config.serverMode ? "true" : "false"));
         WriteMessage("  daemon_mode = " + std::string(m_config.daemonMode ? "true" : "false"));
         WriteMessage("  relay_version = " + std::to_string(m_config.relayVersion));
@@ -1150,12 +1158,16 @@ bool Client::CmdSettings(const ParamsT& params)
 
     if (params.size() < 2)
     {
-        WriteMessage("usage: /settings <key> <value>");
-        return true;
+        const std::string maybeKey = lower(params[0]);
+        if (maybeKey != "config_password" && maybeKey != "private_key")
+        {
+            WriteMessage("usage: /settings <key> <value>");
+            return true;
+        }
     }
 
     const std::string key = lower(params[0]);
-    const std::string value = params[1];
+    const std::string value = params.size() >= 2 ? params[1] : std::string();
 
     auto parseBoolValue = [](const std::string& v, bool& out) {
         const std::string x = lower(trimCopy(v));
@@ -1197,8 +1209,109 @@ bool Client::CmdSettings(const ParamsT& params)
     }
     if (key == "private_key")
     {
-        WriteMessage("[!] private_key is managed by the program; delete the config "
-                     "to generate a new one");
+        std::string newKey = params.size() >= 2 ? joinFrom(params, 1) : std::string();
+        if (newKey == "-")
+        {
+            secureWipe(m_config.privateKey);
+            m_config.samSignatureType.clear();
+            if (!SaveConfig())
+                return true;
+            WriteMessage("private_key cleared; a new one is generated on the next start");
+            return true;
+        }
+        if (newKey.empty())
+        {
+            if (!askPassword("new private_key (hidden, empty cancels): ", newKey))
+            {
+                WriteMessage("[!] cancelled");
+                return true;
+            }
+        }
+        if (newKey.empty())
+        {
+            WriteMessage("cancelled");
+            return true;
+        }
+        const std::string pub = publicDestinationFromPrivate(newKey);
+        if (pub.empty())
+        {
+            WriteMessage("[!] that is not a valid private I2P destination");
+            secureWipe(newKey);
+            return true;
+        }
+        secureWipe(m_config.privateKey);
+        m_config.privateKey = newKey;
+        const std::string sig = signatureTypeFromPrivate(newKey);
+        if (!sig.empty())
+            m_config.samSignatureType = sig;
+        secureWipe(newKey);
+        if (!SaveConfig())
+            return true;
+        WriteMessage("private_key saved; restart to apply");
+        WriteMessage("public destination: " + pub);
+        return true;
+    }
+    if (key == "config_password")
+    {
+        const std::string oldPassword = m_config.configPassword;
+        const bool oldEncrypted = m_config.configEncrypted;
+
+        if (value == "-")
+        {
+            m_config.configPassword.clear();
+            m_config.configEncrypted = false;
+            if (!SaveConfig())
+            {
+                m_config.configPassword = oldPassword;
+                m_config.configEncrypted = oldEncrypted;
+                return true;
+            }
+            WriteMessage("config encryption disabled; the file is now plaintext");
+            return true;
+        }
+
+        std::string first = params.size() >= 2 ? joinFrom(params, 1) : std::string();
+        if (first.empty())
+        {
+            if (!askPassword("new config password: ", first) || first.empty())
+            {
+                WriteMessage("[!] cancelled");
+                return true;
+            }
+            std::string second;
+            if (!askPassword("repeat config password: ", second) || first != second)
+            {
+                secureWipe(first);
+                secureWipe(second);
+                WriteMessage("[!] passwords do not match");
+                return true;
+            }
+            secureWipe(second);
+        }
+
+        m_config.configPassword = first;
+        m_config.configEncrypted = true;
+        const bool ok = SaveConfig();
+        secureWipe(first);
+        if (!ok)
+        {
+            m_config.configPassword = oldPassword;
+            m_config.configEncrypted = oldEncrypted;
+            return true;
+        }
+        WriteMessage("config password changed; the file was re-encrypted");
+        return true;
+    }
+    if (key == "sandbox")
+    {
+        bool enabled = false;
+        if (!parseBoolValue(value, enabled))
+            return bad("true/false");
+        m_config.sandboxEnabled = enabled;
+        SaveConfig();
+        WriteMessage("sandbox saved; restart to apply");
+        if (!enabled)
+            WriteMessage("[!] WARNING: sandbox is disabled");
         return true;
     }
     if (key == "sam_host")
@@ -1329,11 +1442,68 @@ bool Client::CmdSettings(const ParamsT& params)
     }
 
     WriteMessage("[!] unknown setting: " + key);
-    WriteMessage("known: nick sam_host sam_port sam_session sam_signature_type "
-                 "dh_bits group_bits secret_bits rekey_secret_bits max_peer_dh_bits "
-                 "allow_huge_dh server_mode daemon_mode relay_version relay_limit "
+    WriteMessage("known: config_password nick private_key sam_host sam_port "
+                 "sam_session sam_signature_type dh_bits group_bits secret_bits "
+                 "rekey_secret_bits max_peer_dh_bits allow_huge_dh sandbox "
+                 "server_mode daemon_mode relay_version relay_limit "
                  "relay_anonymous relay_ask_plain relay_password");
     return true;
+}
+
+bool Client::CmdDecodeConf(const ParamsT&)
+{
+    WriteMessage("decrypted config: " + m_config.path + " (" +
+                 std::string(m_config.configEncrypted ? "encrypted at rest" : "plaintext") +
+                 ")");
+    return CmdSettings({});
+}
+
+bool Client::CmdPanic(const ParamsT&)
+{
+    const std::string text = "USER IS PANICKED [BYE...]";
+    const auto peers = SnapshotPeers();
+
+    bool sent = false;
+    for (const auto& peer : peers)
+    {
+        if (peer && peer->isRelay() && peer->sendEncrypted("CHAT", text))
+            sent = true;
+    }
+    if (!sent)
+        WriteMessage("[panic] no relay connected; nothing to broadcast");
+
+    WriteMessage("[panic] wiping config and secrets, exiting");
+    m_running.store(false);
+
+    /* Give the relay a moment to forward CHAT before the socket goes away. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    for (const auto& peer : peers)
+    {
+        peer->sendLine("BYE");
+        peer->shutdown();
+        peer->wipeSecrets();
+    }
+
+    const std::string configPath = m_config.path;
+    secureRemoveFile(configPath);
+    secureRemoveFile(configPath + ".tmp");
+    secureRemoveFile(configPath + ".bak");
+
+    secureWipe(m_config.privateKey);
+    secureWipe(m_config.relayPassword);
+    secureWipe(m_config.configPassword);
+    secureWipe(m_config.nick);
+    secureWipe(m_config.samHost);
+    secureWipe(m_config.samSession);
+    secureWipe(m_config.samSignatureType);
+    secureWipe(m_config.path);
+    secureWipe(m_nick);
+    secureWipe(m_myPub);
+    secureWipe(m_myFp);
+
+    std::cout.flush();
+    std::_Exit(0);
+    return false;
 }
 
 /* ---------- commands: chat / network ---------- */
@@ -1552,6 +1722,11 @@ CommandsT commands
     {"rekey", [](Client& c, ParamsT p) { return c.CmdRekey(p); }},
     {"settings", [](Client& c, ParamsT p) { return c.CmdSettings(p); }},
     {"set", [](Client& c, ParamsT p) { return c.CmdSettings(p); }},
+    {"decodeconf", [](Client& c, ParamsT p) { return c.CmdDecodeConf(p); }},
+    {"conf", [](Client& c, ParamsT p) { return c.CmdDecodeConf(p); }},
+    {"showconf", [](Client& c, ParamsT p) { return c.CmdDecodeConf(p); }},
+    {"panic", [](Client& c, ParamsT p) { return c.CmdPanic(p); }},
+    {"p", [](Client& c, ParamsT p) { return c.CmdPanic(p); }},
     {"status", [](Client& c, ParamsT p) { return c.CmdStatus(p); }},
     {"quit", [](Client& c, ParamsT p) { return c.CmdQuit(p); }},
     {"exit", [](Client& c, ParamsT p) { return c.CmdQuit(p); }},

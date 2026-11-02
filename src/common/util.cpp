@@ -8,8 +8,8 @@
 #include <iostream>
 #include <random>
 #include <sstream>
-#include <termios.h>
-#include <unistd.h>
+
+#include "platform.h"
 
 namespace TriMessage
 {
@@ -74,18 +74,12 @@ std::string toHex(const std::vector<std::uint8_t>& v)
 
 std::string randomHex(std::size_t bytes)
 {
-    std::vector<std::uint8_t> v(bytes);
-    for (auto& b : v)
-        b = static_cast<std::uint8_t>(rng64()() & 0xff);
-    return toHex(v);
+    return toHex(secureRandomBytes(bytes));
 }
 
 std::vector<std::uint8_t> randomBytes(std::size_t bytes)
 {
-    std::vector<std::uint8_t> v(bytes);
-    for (auto& b : v)
-        b = static_cast<std::uint8_t>(rng64()() & 0xff);
-    return v;
+    return secureRandomBytes(bytes);
 }
 
 std::string fingerprintOf(const std::string& pub)
@@ -444,19 +438,7 @@ std::string normaliseDestination(const std::string& input)
 
 std::string executableDir(const char* argv0)
 {
-    std::array<char, 4096> buf{};
-    const ssize_t n = ::readlink("/proc/self/exe", buf.data(), buf.size() - 1);
-    if (n > 0)
-    {
-        buf[static_cast<std::size_t>(n)] = '\0';
-        std::string exe(buf.data());
-        const std::size_t slash = exe.find_last_of('/');
-        return slash == std::string::npos ? std::string(".") : exe.substr(0, slash);
-    }
-
-    const std::string arg = argv0 ? argv0 : "";
-    const std::size_t slash = arg.find_last_of('/');
-    return slash == std::string::npos ? std::string(".") : arg.substr(0, slash);
+    return platformExecutableDir(argv0);
 }
 
 std::string joinPath(const std::string& dir, const std::string& name)
@@ -482,35 +464,7 @@ bool askYesNo(const std::string& prompt, bool defaultYes)
 
 bool askPassword(const std::string& prompt, std::string& out)
 {
-    std::cout << prompt << std::flush;
-    out.clear();
-
-    const bool tty = ::isatty(STDIN_FILENO) != 0;
-    termios oldState{};
-    bool changed = false;
-    if (tty && ::tcgetattr(STDIN_FILENO, &oldState) == 0)
-    {
-        termios newState = oldState;
-        newState.c_lflag &= static_cast<tcflag_t>(~ECHO);
-        if (::tcsetattr(STDIN_FILENO, TCSAFLUSH, &newState) == 0)
-            changed = true;
-    }
-
-    std::string line;
-    const bool ok = static_cast<bool>(std::getline(std::cin, line));
-
-    if (changed)
-    {
-        ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &oldState);
-        std::cout << std::endl;
-    }
-
-    if (!ok)
-        return false;
-    if (!line.empty() && line.back() == '\r')
-        line.pop_back();
-    out = line;
-    return true;
+    return readPassword(prompt, out);
 }
 
 } // namespace TriMessage

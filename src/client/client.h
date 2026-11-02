@@ -48,6 +48,8 @@ public:
     bool CmdRekey(const ParamsT& params);
     bool CmdStatus(const ParamsT& params);
     bool CmdSettings(const ParamsT& params);
+    bool CmdDecodeConf(const ParamsT& params);
+    bool CmdPanic(const ParamsT& params);
     bool CmdQuit(const ParamsT& params);
 
     std::string Nick();

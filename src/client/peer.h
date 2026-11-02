@@ -77,6 +77,7 @@ public:
     bool decrypt(const std::string& b64frame, std::string& plain);
 
     void shutdown();
+    void wipeSecrets();
     bool sendPing();
     long handlePong(const std::string& token);
 

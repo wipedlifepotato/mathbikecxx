@@ -1,17 +1,34 @@
 LIBS=-lgmp -lgmpxx
 CXXFLAGS=-std=c++17 -pthread -Wall -Wextra
 INCLUDES=-I. -Isrc
-CXX=g++
+CXX ?= g++
+
+# Platform specific libraries / toolchains.
+UNAME_S := $(shell uname -s)
+ifneq (,$(findstring MINGW,$(UNAME_S)))
+	PLATFORM_LIBS=-lbcrypt -lws2_32
+else ifneq (,$(findstring MSYS,$(UNAME_S)))
+	PLATFORM_LIBS=-lbcrypt -lws2_32
+else ifeq ($(OS),Windows_NT)
+	PLATFORM_LIBS=-lbcrypt -lws2_32
+else ifeq ($(UNAME_S),Darwin)
+	PLATFORM_LIBS=-lsandbox
+else
+	PLATFORM_LIBS=
+endif
 
 TRI_SRC=tri.cpp \
 	src/config.cpp \
 	src/common/util.cpp \
+	src/common/platform.cpp \
+	src/common/hash.cpp \
 	src/common/crypto.cpp \
 	src/common/frame.cpp \
 	src/common/handshake.cpp \
 	src/client/peer.cpp \
 	src/client/client.cpp \
-	src/server/relay.cpp
+	src/server/relay.cpp \
+	src/security/sandbox.cpp
 
 all:
 	printf "make Test # compile a test binary\r\n\r\n"
@@ -29,7 +46,7 @@ lTrigande: trigande.cpp trigande.h
 	$(CXX) trigande.cpp -c -fpic -o trigande.o
 	$(CXX) -shared -o libtrigande.so trigande.o $(LIBS)
 Trie: prepareSAM $(TRI_SRC) trigande.cpp alberthofman.cpp ChaCha20.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) trigande.cpp $(TRI_SRC) alberthofman.cpp ChaCha20.cpp $(LIBS) -li2psam -Li2psam -o Trie
+	$(CXX) $(CXXFLAGS) $(INCLUDES) trigande.cpp $(TRI_SRC) alberthofman.cpp ChaCha20.cpp $(LIBS) $(PLATFORM_LIBS) -li2psam -Li2psam -o Trie
 clean:
 	rm -f Trie test *.o libtrigande.so libhofman.so
 	$(MAKE) -C i2psam clean
