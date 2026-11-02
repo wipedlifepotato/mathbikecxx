@@ -123,7 +123,7 @@ request. A tag `v*` publishes:
 ## Tested
 
 - Linux
-- OpenBSD
+- Windows (On WINE with sandbox: (job object + mitigations))
 
 ## Screenshots
 
