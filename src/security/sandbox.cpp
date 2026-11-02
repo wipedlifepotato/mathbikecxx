@@ -1,3 +1,13 @@
+#if defined(_WIN32)
+/* Must be set before the first system header: on Windows <string> may pull
+ * in <windows.h> through libstdc++'s os_defines.h, so a later #ifndef would
+ * silently keep the toolchain default (often Windows 7) and hide newer APIs. */
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#undef WINVER
+#define WINVER 0x0A00
+#endif
+
 #include "sandbox.h"
 
 #include <algorithm>
@@ -10,9 +20,6 @@
 #include <vector>
 
 #if defined(_WIN32)
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0A00
-#endif
 #include <windows.h>
 #elif defined(__linux__)
 #include <fcntl.h>
@@ -42,6 +49,7 @@ namespace TriMessage
 namespace
 {
 
+#if !defined(_WIN32)
 std::string dirName(const std::string& path)
 {
     const std::size_t slash = path.find_last_of("/\\");
@@ -51,6 +59,7 @@ std::string dirName(const std::string& path)
         return path.substr(0, 1);
     return path.substr(0, slash);
 }
+#endif
 
 #if defined(__linux__) && defined(TRIGANDE_HAVE_LANDLOCK)
 long landlockCreateRuleset(const struct landlock_ruleset_attr* attr,

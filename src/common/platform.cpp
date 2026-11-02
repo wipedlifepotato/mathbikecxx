@@ -1,3 +1,10 @@
+#if defined(_WIN32)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#undef WINVER
+#define WINVER 0x0A00
+#endif
+
 #include "platform.h"
 
 #include <algorithm>
@@ -11,9 +18,6 @@
 #include <sys/stat.h>
 
 #if defined(_WIN32)
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0A00
-#endif
 #include <windows.h>
 #include <bcrypt.h>
 #include <conio.h>

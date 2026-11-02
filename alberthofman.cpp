@@ -1,5 +1,7 @@
 #include"alberthofman.h"
 #include<iostream>
+#include<cstdint>
+#include<string>
 DiffiHofman::DiffiHofman(const mpz_class p, const mpz_class g) : p(p), g(g)
 {
 	int result = mpz_probab_prime_p(p.get_mpz_t(), 25);
@@ -18,8 +20,9 @@ mpz_class DiffiHofman::random_n(unsigned long num_bits)
 	{
 	std::random_device rd;
 	gmp_randclass rand_gen(gmp_randinit_mt); 
-	unsigned long seed = (static_cast<unsigned long>(rd()) << 32) | rd();
-	rand_gen.seed(seed); // random seed for generator
+	std::uint64_t seed = (static_cast<std::uint64_t>(rd()) << 32) |
+	                      static_cast<std::uint64_t>(rd());
+	rand_gen.seed(mpz_class(std::to_string(seed))); // random seed for generator
 			     //
 	mpz_class start_num = rand_gen.get_z_bits(num_bits);
 	mpz_setbit(start_num.get_mpz_t(), num_bits - 1);
@@ -57,8 +60,9 @@ mpz_class DiffiHofman::getPublicKey(unsigned long secret_bits)
 
     std::random_device rd;
     gmp_randclass rand_gen(gmp_randinit_mt);
-    unsigned long seed = (static_cast<unsigned long>(rd()) << 32) | rd();
-    rand_gen.seed(seed);
+    std::uint64_t seed = (static_cast<std::uint64_t>(rd()) << 32) |
+                         static_cast<std::uint64_t>(rd());
+    rand_gen.seed(mpz_class(std::to_string(seed)));
 
     x = rand_gen.get_z_bits(secret_bits);
 

@@ -8,6 +8,13 @@
  * Build: make Trie
  */
 
+#if defined(_WIN32)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#undef WINVER
+#define WINVER 0x0A00
+#endif
+
 #include <cerrno>
 #include <csignal>
 #include <atomic>
@@ -20,6 +27,7 @@
 #include <thread>
 
 #if defined(_WIN32)
+#include <winsock2.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
