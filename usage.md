@@ -28,7 +28,9 @@ Diffie-Hellman не дублируются.
 Поддерживаемые платформы:
 
 - **Linux** — основная цель, sandbox на Landlock + seccomp;
-- **OpenBSD** — sandbox на unveil + pledge;
+- **OpenBSD** — sandbox на unveil + pledge. Нужен `gmake` (`pkg_add gmp
+  gmpxx gmake`), потому что системный `make` не понимает GNU-условия;
+  `ksh make_openbsd.sh` уже вызывает `gmake`;
 - **Windows / macOS** — собираются, но при компиляции и запуске печатается
   предупреждение: полноценной изоляции там нет, использовать только для
   тестов. Для Windows нужен MSYS2/MinGW-w64 и `gmp`, для macOS — Homebrew

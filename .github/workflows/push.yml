@@ -38,7 +38,7 @@ jobs:
           usesh: true
           prepare: |
             export PKG_PATH="https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/packages/$(uname -m)/"
-            pkg_add -I gmp gmpxx
+            pkg_add -I gmp gmpxx gmake
           run: |
             /bin/ksh make_openbsd.sh
             ./Trie --help

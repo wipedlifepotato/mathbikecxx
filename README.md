@@ -33,7 +33,7 @@ make Trie
 OpenBSD:
 
 ```sh
-pkg_add gmp gmpxx
+pkg_add gmp gmpxx gmake
 ksh make_openbsd.sh
 ```
 
