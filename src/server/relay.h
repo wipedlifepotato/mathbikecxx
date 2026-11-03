@@ -42,6 +42,8 @@ private:
     bool HandleIncoming(std::unique_ptr<SAM::I2pSocket> sock);
     void ReaderLoop(std::shared_ptr<Participant> p);
     bool HandleLine(Participant& p, const std::string& line);
+    bool CheckFlood(Participant& p, bool garbage, bool dhRequest,
+                    const std::string& text);
     void JanitorLoop();
 
     bool SendEvent(const std::shared_ptr<Participant>& p,

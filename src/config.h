@@ -7,9 +7,18 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace TriMessage
 {
+
+struct Contact
+{
+    std::string nick;
+    std::string destination;
+    /* 32 random bytes, base64.  Proves the identity of a contact. */
+    std::string secret;
+};
 
 struct Config
 {
@@ -45,6 +54,21 @@ struct Config
     bool relayAnonymous = false;
     bool relayAskPlain = true;
     std::string relayPassword;
+
+    /* Connection approval and anti-flood / anti-ban-flood limits. */
+    bool autoAccept = false;
+    unsigned waitAcceptTimeSec = 45;
+    unsigned floodWindowSec = 10;
+    unsigned floodRepeatLimit = 6;
+    unsigned floodGarbageLimit = 8;
+    unsigned floodDhLimit = 4;
+    unsigned floodMessageLimit = 30;
+    unsigned banInitialSeconds = 60;
+    unsigned banMaxSeconds = 86400;
+    unsigned banMemoryLimitMb = 4;
+
+    bool colors = true;
+    std::vector<Contact> contacts;
 };
 
 enum class LoadResult

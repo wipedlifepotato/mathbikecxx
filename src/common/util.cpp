@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -162,6 +163,20 @@ std::string sanitizeNick(const std::string& in)
     return out;
 }
 
+bool isValidNick(const std::string& in)
+{
+    if (in.empty() || in.size() > 32)
+        return false;
+    for (unsigned char c : in)
+    {
+        if (c >= 0x80)
+            return false;
+        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.'))
+            return false;
+    }
+    return true;
+}
+
 std::string sanitizeText(const std::string& in)
 {
     std::string out = in;
@@ -172,6 +187,59 @@ std::string sanitizeText(const std::string& in)
     }
     return out;
 }
+
+bool hasForbiddenControlBytes(const std::string& in)
+{
+    for (unsigned char c : in)
+    {
+        if (c < 0x20 || c == 0x7f)
+            return true;
+    }
+    return false;
+}
+
+namespace
+{
+std::atomic<bool> g_colors{true};
+}
+
+void setColorEnabled(bool enabled)
+{
+    g_colors.store(enabled);
+}
+
+bool colorEnabled()
+{
+    return g_colors.load();
+}
+
+std::string ansiColor(const char* code)
+{
+    if (!g_colors.load())
+        return {};
+    return std::string("\x1b[") + code + "m";
+}
+
+std::string colorText(const std::string& text, const char* code)
+{
+    if (!g_colors.load())
+        return text;
+    return std::string("\x1b[") + code + "m" + text + "\x1b[0m";
+}
+
+std::string colorNick(const std::string& nick)
+{
+    if (!g_colors.load())
+        return nick;
+    static const char* palette[] = {
+        "1;31", "1;32", "1;33", "1;34", "1;35", "1;36",
+        "31", "32", "33", "34", "35", "36",
+        "91", "92", "93", "94", "95", "96"};
+    const std::size_t idx = static_cast<std::size_t>(fnv1a(nick)) %
+                            (sizeof(palette) / sizeof(palette[0]));
+    return colorText(nick, palette[idx]);
+}
+
 
 std::vector<std::string> splitChar(const std::string& s, char sep)
 {

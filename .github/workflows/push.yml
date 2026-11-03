@@ -44,8 +44,20 @@ jobs:
             ./Trie --help
 
   build-windows:
-    name: Windows (MinGW, not fully isolated)
+    name: Windows static (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msystem: MINGW64
+            prefix: mingw-w64-x86_64
+            arch: x86_64
+            makefile: Makefile.mingw64
+          - msystem: MINGW32
+            prefix: mingw-w64-i686
+            arch: i686
+            makefile: Makefile.mingw32
     defaults:
       run:
         shell: msys2 {0}
@@ -55,18 +67,25 @@ jobs:
           submodules: recursive
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.msystem }}
           update: true
           install: >-
             git
             make
             zip
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-gmp
-      - name: Build Trie.exe
+            ${{ matrix.prefix }}-gcc
+            ${{ matrix.prefix }}-gmp
+      - name: Build static Trie.exe
         run: |
-          make prepareSAM
-          make Trie
+          set -euo pipefail
+          make -f ${{ matrix.makefile }} prepareSAM
+          make -f ${{ matrix.makefile }}
+          IMPORTS="$(objdump -p Trie.exe | sed -n 's/.*DLL Name: //p' | tr '[:upper:]' '[:lower:]')"
+          echo "$IMPORTS"
+          if echo "$IMPORTS" | grep -Eq 'lib(gmp|stdc|gcc|winpthread)'; then
+            echo "::error::Trie.exe is not fully static"
+            exit 1
+          fi
       - name: Smoke test
         run: ./Trie.exe --help
 

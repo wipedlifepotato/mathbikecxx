@@ -1,0 +1,56 @@
+# Static Windows build (MinGW-w64), 32-bit by default.
+#
+#   make -f Makefile.mingw32                       # i686, static
+#   make -f Makefile.mingw32 BITS=64               # x86_64, static
+#   make -f Makefile.mingw32 GMP_PREFIX=/opt/gmp   # cross-compiled GMP
+#
+# MSYS2:  pacman -S mingw-w64-i686-gcc mingw-w64-i686-gmp
+#         pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-gmp
+#
+# Debian: install g++-mingw-w64-i686 g++-mingw-w64-x86-64 and either use a
+# static GMP built for the target or pass GMP_PREFIX.  Nothing from the host
+# is imported by the resulting Trie.exe except the Windows system DLLs.
+#
+# The Makefile.mingw64 wrapper is just "BITS=64 make -f Makefile.mingw32".
+
+BITS ?= 32
+
+ifeq ($(BITS),64)
+TRIPLET ?= x86_64-w64-mingw32
+else
+TRIPLET ?= i686-w64-mingw32
+endif
+
+CXX ?= $(TRIPLET)-g++
+AR ?= $(TRIPLET)-ar
+GMP_PREFIX ?=
+
+MINGW_CPPFLAGS := $(if $(GMP_PREFIX),-I$(GMP_PREFIX)/include)
+MINGW_LDFLAGS := $(if $(GMP_PREFIX),-L$(GMP_PREFIX)/lib)
+
+# Fully static: libgcc, libstdc++, winpthread and GMP are all linked into the
+# executable.  This is what makes the archive usable on a clean Windows box.
+STATIC_LDFLAGS := -static -static-libgcc -static-libstdc++
+
+MINGW_VARS = \
+	CXX="$(CXX)" \
+	AR="$(AR)" \
+	CXXFLAGS="-std=c++17 -pthread -Wall -Wextra $(MINGW_CPPFLAGS)" \
+	LIBS="$(MINGW_LDFLAGS) -lgmpxx -lgmp" \
+	PLATFORM_DEFS=-DWIN32 \
+	PLATFORM_LDFLAGS="$(STATIC_LDFLAGS)" \
+	PLATFORM_LIBS="-lbcrypt -lws2_32"
+
+all: Trie
+
+Trie:
+	$(MAKE) -f Makefile Trie $(MINGW_VARS)
+
+prepareSAM:
+	$(MAKE) -f Makefile prepareSAM $(MINGW_VARS)
+
+clean:
+	$(MAKE) -f Makefile clean
+	rm -f Trie.exe
+
+.PHONY: all Trie prepareSAM clean

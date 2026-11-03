@@ -41,8 +41,26 @@ std::string anonymousFingerprint(std::uint64_t seq);
 
 std::string lower(std::string s);
 std::string trimCopy(const std::string& s);
+
+/*
+ * Nicknames are deliberately restricted to ASCII letters, digits, '_', '-'
+ * and '.'.  The same check is used at startup, on /nick and for every remote
+ * nickname, so a Unicode spoof such as "usеr" can never be displayed as
+ * "user".
+ */
+bool isValidNick(const std::string& in);
 std::string sanitizeNick(const std::string& in);
 std::string sanitizeText(const std::string& in);
+
+/* True when a decrypted chat payload contains C0/C1 control bytes. */
+bool hasForbiddenControlBytes(const std::string& in);
+
+/* ANSI colours, controlled by the `colors` config option. */
+void setColorEnabled(bool enabled);
+bool colorEnabled();
+std::string ansiColor(const char* code);
+std::string colorText(const std::string& text, const char* code);
+std::string colorNick(const std::string& nick);
 
 std::vector<std::string> splitChar(const std::string& s, char sep);
 std::vector<std::string> splitArgs(const std::string& line);

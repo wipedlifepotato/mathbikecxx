@@ -60,6 +60,18 @@ enum
     OptSecretBits,
     OptMaxPeerDhBits,
     OptAllowHugeDh,
+    OptAutoAccept,
+    OptNoAutoAccept,
+    OptWaitAcceptTime,
+    OptFloodWindow,
+    OptFloodRepeat,
+    OptFloodGarbage,
+    OptFloodDh,
+    OptFloodMessage,
+    OptBanInitial,
+    OptBanMax,
+    OptBanMemory,
+    OptNoColor,
     OptRelayVersion,
     OptRelayLimit,
     OptAnonymous,
@@ -81,6 +93,20 @@ void printUsage(const char* argv0)
         << "  -n, --nick <name>          nickname\n"
         << "  -k, --priv <destination>   private destination to reuse\n"
         << "  -s, --session <name>       SAM session name\n"
+        << "\n"
+        << "Acceptance and anti-flood:\n"
+        << "      --auto-accept          accept incoming peers without asking\n"
+        << "      --no-auto-accept       incoming peers need /accept first\n"
+        << "      --wait-accept-time <s> seconds to wait for /accept (default 45)\n"
+        << "      --flood-window <s>     anti-flood window (default 10)\n"
+        << "      --flood-repeat <n>     repeated messages before a kick (default 6)\n"
+        << "      --flood-garbage <n>    garbage frames before a kick (default 8)\n"
+        << "      --flood-dh <n>         DH requests per window before a kick (default 4)\n"
+        << "      --flood-messages <n>   messages per window before a kick (default 30)\n"
+        << "      --ban-initial <s>      first ban duration (default 60)\n"
+        << "      --ban-max <s>          maximum ban duration (default 86400)\n"
+        << "      --ban-memory <mb>      maximum memory used by bans (default 4)\n"
+        << "      --no-color             disable ANSI colours\n"
         << "\n"
         << "Relay server:\n"
         << "  -S, --server               run as a relay chat server\n"
@@ -255,6 +281,23 @@ int main(int argc, char** argv)
     bool optServer = false;
     bool optDaemon = false;
     bool optAllowHugeDh = false;
+    bool optAutoAccept = false;
+    bool haveAutoAccept = false;
+    bool optNoColor = false;
+    unsigned optWaitAcceptTime = 0;
+    unsigned optFloodWindow = 0;
+    unsigned optFloodRepeat = 0;
+    unsigned optFloodGarbage = 0;
+    unsigned optFloodDh = 0;
+    unsigned optFloodMessage = 0;
+    unsigned optBanInitial = 0;
+    unsigned optBanMax = 0;
+    unsigned optBanMemory = 0;
+    bool haveFloodRepeat = false;
+    bool haveFloodGarbage = false;
+    bool haveFloodDh = false;
+    bool haveFloodMessage = false;
+    bool haveBanMemory = false;
     bool optAnonymous = false;
     bool optNoAskPlain = false;
     bool havePassword = false;
@@ -277,6 +320,18 @@ int main(int argc, char** argv)
         {"secret-bits", required_argument, nullptr, OptSecretBits},
         {"max-peer-dh-bits", required_argument, nullptr, OptMaxPeerDhBits},
         {"allow-huge-dh", no_argument, nullptr, OptAllowHugeDh},
+        {"auto-accept", no_argument, nullptr, OptAutoAccept},
+        {"no-auto-accept", no_argument, nullptr, OptNoAutoAccept},
+        {"wait-accept-time", required_argument, nullptr, OptWaitAcceptTime},
+        {"flood-window", required_argument, nullptr, OptFloodWindow},
+        {"flood-repeat", required_argument, nullptr, OptFloodRepeat},
+        {"flood-garbage", required_argument, nullptr, OptFloodGarbage},
+        {"flood-dh", required_argument, nullptr, OptFloodDh},
+        {"flood-messages", required_argument, nullptr, OptFloodMessage},
+        {"ban-initial", required_argument, nullptr, OptBanInitial},
+        {"ban-max", required_argument, nullptr, OptBanMax},
+        {"ban-memory", required_argument, nullptr, OptBanMemory},
+        {"no-color", no_argument, nullptr, OptNoColor},
         {"relay-version", required_argument, nullptr, OptRelayVersion},
         {"relay-limit", required_argument, nullptr, OptRelayLimit},
         {"anonymous", no_argument, nullptr, OptAnonymous},
@@ -338,6 +393,49 @@ int main(int argc, char** argv)
                 break;
             case OptAllowHugeDh:
                 optAllowHugeDh = true;
+                break;
+            case OptAutoAccept:
+                optAutoAccept = true;
+                haveAutoAccept = true;
+                break;
+            case OptNoAutoAccept:
+                optAutoAccept = false;
+                haveAutoAccept = true;
+                break;
+            case OptWaitAcceptTime:
+                optWaitAcceptTime = static_cast<unsigned>(std::stoul(optarg));
+                break;
+            case OptFloodWindow:
+                optFloodWindow = static_cast<unsigned>(std::stoul(optarg));
+                break;
+            case OptFloodRepeat:
+                optFloodRepeat = static_cast<unsigned>(std::stoul(optarg));
+                haveFloodRepeat = true;
+                break;
+            case OptFloodGarbage:
+                optFloodGarbage = static_cast<unsigned>(std::stoul(optarg));
+                haveFloodGarbage = true;
+                break;
+            case OptFloodDh:
+                optFloodDh = static_cast<unsigned>(std::stoul(optarg));
+                haveFloodDh = true;
+                break;
+            case OptFloodMessage:
+                optFloodMessage = static_cast<unsigned>(std::stoul(optarg));
+                haveFloodMessage = true;
+                break;
+            case OptBanInitial:
+                optBanInitial = static_cast<unsigned>(std::stoul(optarg));
+                break;
+            case OptBanMax:
+                optBanMax = static_cast<unsigned>(std::stoul(optarg));
+                break;
+            case OptBanMemory:
+                optBanMemory = static_cast<unsigned>(std::stoul(optarg));
+                haveBanMemory = true;
+                break;
+            case OptNoColor:
+                optNoColor = true;
                 break;
             case OptRelayVersion:
                 optRelayVersion = static_cast<unsigned>(std::stoul(optarg));
@@ -530,6 +628,86 @@ int main(int argc, char** argv)
         cfg.allowHugeDh = true;
         dirty = true;
     }
+    if (haveAutoAccept)
+    {
+        cfg.autoAccept = optAutoAccept;
+        dirty = true;
+    }
+    if (optWaitAcceptTime != 0)
+    {
+        if (optWaitAcceptTime < 5 || optWaitAcceptTime > 3600)
+        {
+            std::cerr << "--wait-accept-time must be 5..3600 seconds" << std::endl;
+            return 2;
+        }
+        cfg.waitAcceptTimeSec = optWaitAcceptTime;
+        dirty = true;
+    }
+    if (optFloodWindow != 0)
+    {
+        if (optFloodWindow < 1 || optFloodWindow > 3600)
+        {
+            std::cerr << "--flood-window must be 1..3600 seconds" << std::endl;
+            return 2;
+        }
+        cfg.floodWindowSec = optFloodWindow;
+        dirty = true;
+    }
+    if (haveFloodRepeat)
+    {
+        cfg.floodRepeatLimit = optFloodRepeat;
+        dirty = true;
+    }
+    if (haveFloodGarbage)
+    {
+        cfg.floodGarbageLimit = optFloodGarbage;
+        dirty = true;
+    }
+    if (haveFloodDh)
+    {
+        cfg.floodDhLimit = optFloodDh;
+        dirty = true;
+    }
+    if (haveFloodMessage)
+    {
+        cfg.floodMessageLimit = optFloodMessage;
+        dirty = true;
+    }
+    if (optBanInitial != 0)
+    {
+        if (optBanInitial < 1 || optBanInitial > 86400u * 30u)
+        {
+            std::cerr << "--ban-initial must be 1..2592000 seconds" << std::endl;
+            return 2;
+        }
+        cfg.banInitialSeconds = optBanInitial;
+        dirty = true;
+    }
+    if (optBanMax != 0)
+    {
+        if (optBanMax < 1 || optBanMax > 86400u * 365u)
+        {
+            std::cerr << "--ban-max must be 1..31536000 seconds" << std::endl;
+            return 2;
+        }
+        cfg.banMaxSeconds = optBanMax;
+        dirty = true;
+    }
+    if (haveBanMemory)
+    {
+        if (optBanMemory > 1024)
+        {
+            std::cerr << "--ban-memory must be 0..1024 MB" << std::endl;
+            return 2;
+        }
+        cfg.banMemoryLimitMb = optBanMemory;
+        dirty = true;
+    }
+    if (optNoColor)
+    {
+        cfg.colors = false;
+        dirty = true;
+    }
     if (optAnonymous)
     {
         cfg.relayAnonymous = true;
@@ -588,9 +766,29 @@ int main(int argc, char** argv)
     }
 
     const std::string originalNick = cfg.nick;
-    cfg.nick = sanitizeNick(cfg.nick);
+    if (cfg.nick.empty())
+        cfg.nick = (cfg.serverMode ? "relay" : "user" + randomHex(2));
+    else if (!isValidNick(cfg.nick))
+    {
+        std::cerr << "invalid nickname: only ASCII letters, digits, '_', '-' and "
+                     "'.' are allowed (max 32 characters). "
+                     "A non-Latin or lookalike nickname is not accepted."
+                  << std::endl;
+        return 2;
+    }
     if (cfg.nick != originalNick)
         dirty = true;
+
+    setColorEnabled(cfg.colors);
+#if defined(_WIN32)
+    if (cfg.colors)
+    {
+        HANDLE out = ::GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        if (out != INVALID_HANDLE_VALUE && ::GetConsoleMode(out, &mode))
+            ::SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+#endif
 
     if (cfg.samSession.empty())
     {

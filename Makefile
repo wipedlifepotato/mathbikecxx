@@ -1,7 +1,9 @@
 LIBS=-lgmp -lgmpxx
 CXXFLAGS=-std=c++17 -pthread -Wall -Wextra
+LDFLAGS ?=
 INCLUDES=-I. -Isrc
 CXX ?= g++
+AR ?= ar
 
 # Platform specific libraries / defines.  These are GNU make constructs, so
 # OpenBSD needs gmake (see make_openbsd.sh and the CI jobs).
@@ -45,17 +47,17 @@ all:
 	printf "make lHofman # compile a libhofman.so\r\n\r\n"
 	printf "make Trie # compile TriMessage client and relay\r\n\r\n"
 prepareSAM: 
-	$(MAKE) -C i2psam CXX="$(CXX)" CXXFLAGS="$(SAM_CXXFLAGS)"
+	$(MAKE) -C i2psam CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(SAM_CXXFLAGS)"
 lHofman: alberthofman.cpp alberthofman.h
 	$(CXX) alberthofman.cpp -c -fpic -o alberthofman.o
 	$(CXX) -shared -o libhofman.so alberthofman.o $(LIBS)
 Test: prepareSAM
-	$(CXX) $(CXXFLAGS) $(PLATFORM_DEFS) $(INCLUDES) trigande.cpp test.cpp alberthofman.cpp $(LIBS) -li2psam -Li2psam $(PLATFORM_LIBS) -o test
+	$(CXX) $(CXXFLAGS) $(PLATFORM_DEFS) $(INCLUDES) $(PLATFORM_LDFLAGS) trigande.cpp test.cpp alberthofman.cpp $(LIBS) -li2psam -Li2psam $(PLATFORM_LIBS) $(LDFLAGS) -o test
 lTrigande: trigande.cpp trigande.h
 	$(CXX) trigande.cpp -c -fpic -o trigande.o
 	$(CXX) -shared -o libtrigande.so trigande.o $(LIBS)
 Trie: prepareSAM $(TRI_SRC) trigande.cpp alberthofman.cpp ChaCha20.cpp
-	$(CXX) $(CXXFLAGS) $(PLATFORM_DEFS) $(INCLUDES) trigande.cpp $(TRI_SRC) alberthofman.cpp ChaCha20.cpp $(LIBS) -li2psam -Li2psam $(PLATFORM_LIBS) -o Trie
+	$(CXX) $(CXXFLAGS) $(PLATFORM_DEFS) $(INCLUDES) $(PLATFORM_LDFLAGS) trigande.cpp $(TRI_SRC) alberthofman.cpp ChaCha20.cpp $(LIBS) -li2psam -Li2psam $(PLATFORM_LIBS) $(LDFLAGS) -o Trie
 clean:
 	rm -f Trie test *.o libtrigande.so libhofman.so
 	$(MAKE) -C i2psam clean

@@ -408,6 +408,85 @@ LoadResult loadConfig(const std::string& path, const std::string& password,
         }
         else if (key == "relay_password")
             cfg.relayPassword = value;
+        else if (key == "auto_accept" || key == "autoaccept")
+        {
+            if (!parseBool(value, b))
+                return LoadResult::Error;
+            cfg.autoAccept = b;
+        }
+        else if (key == "wait_accept_time_sec" || key == "waitaccepttimesec")
+        {
+            if (!parseUInt(value, u, 3600) || u < 5)
+                return LoadResult::Error;
+            cfg.waitAcceptTimeSec = u;
+        }
+        else if (key == "flood_window_sec")
+        {
+            if (!parseUInt(value, u, 3600) || u < 1)
+                return LoadResult::Error;
+            cfg.floodWindowSec = u;
+        }
+        else if (key == "flood_repeat_limit")
+        {
+            if (!parseUInt(value, u, 100000))
+                return LoadResult::Error;
+            cfg.floodRepeatLimit = u;
+        }
+        else if (key == "flood_garbage_limit")
+        {
+            if (!parseUInt(value, u, 100000))
+                return LoadResult::Error;
+            cfg.floodGarbageLimit = u;
+        }
+        else if (key == "flood_dh_limit")
+        {
+            if (!parseUInt(value, u, 100000))
+                return LoadResult::Error;
+            cfg.floodDhLimit = u;
+        }
+        else if (key == "flood_message_limit")
+        {
+            if (!parseUInt(value, u, 100000))
+                return LoadResult::Error;
+            cfg.floodMessageLimit = u;
+        }
+        else if (key == "ban_initial_seconds")
+        {
+            if (!parseUInt(value, u, 86400 * 30) || u < 1)
+                return LoadResult::Error;
+            cfg.banInitialSeconds = u;
+        }
+        else if (key == "ban_max_seconds")
+        {
+            if (!parseUInt(value, u, 86400 * 365) || u < 1)
+                return LoadResult::Error;
+            cfg.banMaxSeconds = u;
+        }
+        else if (key == "ban_memory_limit_mb")
+        {
+            if (!parseUInt(value, u, 1024))
+                return LoadResult::Error;
+            cfg.banMemoryLimitMb = u;
+        }
+        else if (key == "colors")
+        {
+            if (!parseBool(value, b))
+                return LoadResult::Error;
+            cfg.colors = b;
+        }
+        else if (key == "contact")
+        {
+            const auto parts = splitChar(value, '|');
+            if (parts.size() != 3)
+                return LoadResult::Error;
+            Contact c;
+            c.nick = sanitizeNick(parts[0]);
+            c.destination = normaliseDestination(parts[1]);
+            c.secret = trimCopy(parts[2]);
+            if (c.destination.empty() || c.secret.empty())
+                return LoadResult::Error;
+            cfg.contacts.push_back(std::move(c));
+        }
         /* Unknown keys are ignored so an older binary can read a newer file. */
     }
 
@@ -465,7 +544,35 @@ bool saveConfig(Config& cfg, std::string& err)
        << "relay_ask_plain = " << b2s(cfg.relayAskPlain) << "\n"
        << "# Empty means the relay is open.  This is the group password,\n"
        << "# not the password that encrypts this config file.\n"
-       << "relay_password = " << cfg.relayPassword << "\n";
+       << "relay_password = " << cfg.relayPassword << "\n"
+       << "\n"
+       << "# Connection approval.  Without auto_accept an incoming peer becomes\n"
+       << "# a request that must be accepted with /accept within this many seconds.\n"
+       << "auto_accept = " << b2s(cfg.autoAccept) << "\n"
+       << "wait_accept_time_sec = " << cfg.waitAcceptTimeSec << "\n"
+       << "\n"
+       << "# Anti-flood limits per peer and per window.\n"
+       << "flood_window_sec = " << cfg.floodWindowSec << "\n"
+       << "flood_repeat_limit = " << cfg.floodRepeatLimit << "\n"
+       << "flood_garbage_limit = " << cfg.floodGarbageLimit << "\n"
+       << "flood_dh_limit = " << cfg.floodDhLimit << "\n"
+       << "flood_message_limit = " << cfg.floodMessageLimit << "\n"
+       << "\n"
+       << "# Ban time starts at ban_initial_seconds and doubles on every repeat\n"
+       << "# offence until ban_max_seconds (24 hours by default).\n"
+       << "ban_initial_seconds = " << cfg.banInitialSeconds << "\n"
+       << "ban_max_seconds = " << cfg.banMaxSeconds << "\n"
+       << "ban_memory_limit_mb = " << cfg.banMemoryLimitMb << "\n"
+       << "\n"
+       << "colors = " << b2s(cfg.colors) << "\n"
+       << "\n"
+       << "# Contacts: nick|destination|base64(32-byte shared secret).\n";
+
+    for (const auto& c : cfg.contacts)
+    {
+        os << "contact = " << c.nick << "|" << c.destination << "|"
+           << c.secret << "\n";
+    }
 
     const std::string plain = os.str();
 

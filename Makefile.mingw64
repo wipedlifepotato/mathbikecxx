@@ -1,0 +1,7 @@
+# Static 64-bit Windows build (MinGW-w64).  See Makefile.mingw32 for details.
+#
+#   make -f Makefile.mingw64
+#   make -f Makefile.mingw64 GMP_PREFIX=/opt/gmp-x86_64
+
+BITS = 64
+include Makefile.mingw32

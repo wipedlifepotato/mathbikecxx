@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -34,6 +35,15 @@ struct RelayServer::Participant
 
     std::mutex writeMutex;
     std::atomic<std::uint64_t> lastRx{0};
+
+    /* Per-participant flood counters (protected by the reader thread). */
+    std::uint64_t floodWindow = 0;
+    unsigned floodMessages = 0;
+    unsigned floodRepeats = 0;
+    unsigned floodGarbage = 0;
+    unsigned floodDh = 0;
+    bool floodWarned = false;
+    std::deque<std::string> recentMessages;
 
     bool sendLine(const std::string& line)
     {
@@ -275,6 +285,13 @@ bool RelayServer::HandleIncoming(std::unique_ptr<SAM::I2pSocket> sock)
         HsData cli;
         if (!decodeHs(payload, cli))
             return false;
+        if (!isValidNick(cli.nick))
+        {
+            sendLine("HELLO_REJECT invalid nickname: ASCII letters, digits, "
+                     "'_', '-' and '.' only");
+            Log("[!] rejected a participant with an invalid nickname");
+            return false;
+        }
         if (cli.relayVersion != kRelayDirect)
         {
             sendLine("HELLO_REJECT direct clients only");
@@ -557,6 +574,73 @@ void RelayServer::ReaderLoop(std::shared_ptr<Participant> p)
     Remove(p->id, p->alive ? "connection lost" : "disconnected");
 }
 
+bool RelayServer::CheckFlood(Participant& p, bool garbage, bool dhRequest,
+                             const std::string& text)
+{
+    const std::uint64_t now = nowSeconds();
+    const unsigned window = std::max(1u, m_config.floodWindowSec);
+    if (p.floodWindow == 0 || now - p.floodWindow >= window)
+    {
+        p.floodWindow = now;
+        p.floodMessages = 0;
+        p.floodRepeats = 0;
+        p.floodGarbage = 0;
+        p.floodDh = 0;
+        p.floodWarned = false;
+        p.recentMessages.clear();
+    }
+
+    ++p.floodMessages;
+    if (garbage)
+        ++p.floodGarbage;
+    if (dhRequest)
+        ++p.floodDh;
+
+    if (!text.empty())
+    {
+        bool repeat = false;
+        for (const auto& old : p.recentMessages)
+        {
+            if (old == text)
+            {
+                repeat = true;
+                break;
+            }
+        }
+        if (repeat)
+            ++p.floodRepeats;
+        p.recentMessages.push_back(text);
+        if (p.recentMessages.size() > 12)
+            p.recentMessages.pop_front();
+    }
+
+    if ((m_config.floodMessageLimit > 0 &&
+         p.floodMessages > m_config.floodMessageLimit) ||
+        (m_config.floodRepeatLimit > 0 &&
+         p.floodRepeats > m_config.floodRepeatLimit) ||
+        (m_config.floodGarbageLimit > 0 &&
+         p.floodGarbage > m_config.floodGarbageLimit) ||
+        (m_config.floodDhLimit > 0 && p.floodDh > m_config.floodDhLimit))
+    {
+        Log("[!] anti-flood: dropping #" + std::to_string(p.id) + " " + p.nick);
+        return true;
+    }
+
+    if (!p.floodWarned && m_config.floodMessageLimit > 0 &&
+        p.floodMessages >= (m_config.floodMessageLimit * 3) / 4)
+    {
+        p.floodWarned = true;
+        const std::string plain = makePlain(
+            "SERVER", m_myFp, m_nick,
+            "warning: you are sending messages too fast");
+        if (p.plain)
+            p.sendLine("MSG " + encodePlain(plain));
+        else
+            p.sendLine("MSG " + makeFrame(p.key, plain));
+    }
+    return false;
+}
+
 bool RelayServer::HandleLine(Participant& p, const std::string& line)
 {
     const std::size_t sp = line.find(' ');
@@ -565,12 +649,19 @@ bool RelayServer::HandleLine(Participant& p, const std::string& line)
 
     if (type == "PING")
     {
+        if (CheckFlood(p, false, false, {}))
+            return false;
         p.sendLine("PONG " + payload);
         return true;
     }
-    if (type == "PONG" || type == "REKEY" || type == "REKEY_ACK" ||
-        type == "REKEY_DONE")
+    if (type == "PONG")
         return true;
+    if (type == "REKEY" || type == "REKEY_ACK" || type == "REKEY_DONE")
+    {
+        if (CheckFlood(p, false, true, {}))
+            return false;
+        return true;
+    }
     if (type == "BYE")
         return false;
 
@@ -579,7 +670,13 @@ bool RelayServer::HandleLine(Participant& p, const std::string& line)
         std::vector<std::uint8_t> raw;
         if (base64Decode(payload, raw))
         {
-            const std::string n = sanitizeNick(std::string(raw.begin(), raw.end()));
+            const std::string n(raw.begin(), raw.end());
+            if (!isValidNick(n))
+            {
+                Log("[!] #" + std::to_string(p.id) +
+                    " sent an invalid nickname; dropping");
+                return false;
+            }
             p.nick = n;
             Log("[nick] #" + std::to_string(p.id) + " is now " + n);
             BroadcastRoster();
@@ -588,38 +685,69 @@ bool RelayServer::HandleLine(Participant& p, const std::string& line)
     }
 
     if (type != "MSG")
+    {
+        if (CheckFlood(p, true, false, {}))
+            return false;
         return true;
+    }
 
     std::string plainText;
     if (p.plain)
     {
         if (!decodePlain(payload, plainText))
+        {
+            if (CheckFlood(p, true, false, {}))
+                return false;
+            Log("[!] malformed plaintext message from #" + std::to_string(p.id));
             return true;
+        }
     }
     else if (!decryptFrame(payload, p.key, plainText))
     {
+        if (CheckFlood(p, true, false, {}))
+            return false;
         Log("[!] can't decrypt a message from #" + std::to_string(p.id));
         return true;
     }
 
     PlainData data;
     if (!parsePlain(plainText, data))
+    {
+        if (CheckFlood(p, true, false, {}))
+            return false;
         return true;
+    }
+
+    if (hasForbiddenControlBytes(data.text) ||
+        hasForbiddenControlBytes(data.type) ||
+        hasForbiddenControlBytes(data.fromFp) ||
+        hasForbiddenControlBytes(data.fromNick))
+    {
+        Log("[!] #" + std::to_string(p.id) +
+            " sent forbidden control bytes; dropping");
+        return false;
+    }
 
     if (data.type == "CHAT")
     {
+        if (CheckFlood(p, false, false, data.text))
+            return false;
         if (data.text.size() > kMaxChatBytes)
             return true;
         BroadcastChat(p, data.text);
     }
     else if (data.type == "PING")
     {
+        if (CheckFlood(p, false, false, data.text))
+            return false;
         const std::string pong = makePlain("PONG", m_myFp, m_nick, data.text);
         if (p.plain)
             p.sendLine("MSG " + encodePlain(pong));
         else
             p.sendLine("MSG " + makeFrame(p.key, pong));
     }
+    else if (CheckFlood(p, true, false, {}))
+        return false;
     return true;
 }
 

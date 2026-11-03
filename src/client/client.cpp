@@ -2,6 +2,7 @@
 
 #include "common/frame.h"
 #include "common/handshake.h"
+#include "common/hash.h"
 #include "common/lines.h"
 #include "common/platform.h"
 #include "common/protocol.h"
@@ -10,9 +11,11 @@
 #include "alberthofman.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -26,6 +29,7 @@ Client::Client(Config cfg)
     : m_config(std::move(cfg)),
       m_nick(sanitizeNick(m_config.nick))
 {
+    setColorEnabled(m_config.colors);
     m_config.nick = m_nick;
     if (m_config.samSession.empty())
     {
@@ -131,6 +135,22 @@ Client::~Client()
         p->shutdown();
     }
 
+    std::vector<std::shared_ptr<PendingPeer>> pending;
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMutex);
+        for (auto& it : m_pending)
+            pending.push_back(it.second);
+        m_pending.clear();
+    }
+    for (auto& p : pending)
+    {
+        if (p && p->sock)
+        {
+            p->sock->write("BYE\n");
+            p->sock->close();
+        }
+    }
+
     if (m_acceptThread.joinable())
         m_acceptThread.detach();
     if (m_rekeyThread.joinable())
@@ -171,6 +191,19 @@ void Client::ShutdownNow()
     {
         peer->sendLine("BYE");
         peer->shutdown();
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMutex);
+        for (auto& it : m_pending)
+        {
+            if (it.second && it.second->sock)
+            {
+                it.second->sock->write("BYE\n");
+                it.second->sock->close();
+            }
+        }
+        m_pending.clear();
     }
 
     m_running.store(false);
@@ -308,19 +341,21 @@ void Client::OnChat(Peer& peer, const PlainData& data)
         const std::string fromNick =
             data.fromNick.empty() ? std::string("anonymous") : data.fromNick;
         const std::string fp = data.fromFp.empty() ? std::string("?") : shortFp(data.fromFp);
-        line = "[" + fromNick + " " + fp + "] " + data.text;
+        line = "[" + colorNick(fromNick) + " " +
+               colorText(fp, "2") + "] " + data.text;
         peer.addHistory(line);
         WriteMessage(line);
         return;
     }
 
-    line = "[" + peer.nickname() + "#" + std::to_string(peer.id()) + "] " + data.text;
+    line = "[" + colorNick(peer.nickname()) + "#" + std::to_string(peer.id()) +
+           "] " + data.text;
     peer.addHistory(line);
     if (ActivePeer() == peer.id())
         WriteMessage(line);
     else
-        WriteMessage("[#" + std::to_string(peer.id()) + " " + peer.nickname() +
-                     "] (new message) " + data.text);
+        WriteMessage("[#" + std::to_string(peer.id()) + " " +
+                     colorNick(peer.nickname()) + "] (new message) " + data.text);
 }
 
 void Client::PrintPeerHistory(const std::shared_ptr<Peer>& peer)
@@ -388,7 +423,647 @@ bool Client::CheckPeerDh(const HsData& hs, bool interactive, std::string& reason
     return true;
 }
 
-/* ---------- networking ---------- */
+/* ---------- contacts, approval, bans and anti-flood ---------- */
+
+namespace
+{
+
+std::string banKeyFor(const std::string& destination, const std::string& fingerprint)
+{
+    if (!destination.empty())
+        return "d:" + destination;
+    if (!fingerprint.empty())
+        return "f:" + fingerprint;
+    return {};
+}
+
+bool decodeContactSecret(const std::string& secret,
+                         std::vector<std::uint8_t>& out)
+{
+    out.clear();
+    if (base64Decode(secret, out) && !out.empty())
+        return true;
+
+    /* Also accept a plain hex secret typed by hand. */
+    if (secret.size() % 2 != 0 || secret.empty())
+        return false;
+    out.clear();
+    for (std::size_t i = 0; i < secret.size(); i += 2)
+    {
+        auto hex = [](char c) -> int {
+            if (c >= '0' && c <= '9')
+                return c - '0';
+            if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
+            return -1;
+        };
+        const int hi = hex(secret[i]);
+        const int lo = hex(secret[i + 1]);
+        if (hi < 0 || lo < 0)
+        {
+            out.clear();
+            return false;
+        }
+        out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+    }
+    return !out.empty();
+}
+
+} // namespace
+
+bool Client::FindContactByDest(const std::string& destination, Contact& out)
+{
+    std::lock_guard<std::mutex> lk(m_contactsMutex);
+    for (const auto& c : m_config.contacts)
+    {
+        if (c.destination == destination)
+        {
+            out = c;
+            return true;
+        }
+    }
+    return false;
+}
+
+int Client::FindContactIndex(const std::string& what)
+{
+    std::lock_guard<std::mutex> lk(m_contactsMutex);
+    try
+    {
+        const int n = std::stoi(what);
+        if (n >= 1 && static_cast<std::size_t>(n) <= m_config.contacts.size())
+            return n - 1;
+    }
+    catch (...)
+    {
+    }
+
+    const std::string needle = lower(what);
+    for (std::size_t i = 0; i < m_config.contacts.size(); ++i)
+    {
+        const Contact& c = m_config.contacts[i];
+        if (lower(c.nick) == needle || c.destination == what ||
+            lower(fingerprintOf(c.destination)).compare(0, needle.size(), needle) == 0)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+std::string Client::MakeContactProof(const Contact& c,
+                                     const std::string& transcript) const
+{
+    std::vector<std::uint8_t> secret;
+    if (!decodeContactSecret(c.secret, secret))
+        return {};
+    const Sha256Digest mac = hmacSha256(secret.data(), secret.size(),
+                                        transcript.data(), transcript.size());
+    secureZero(secret.data(), secret.size());
+    return toHex(mac.data(), mac.size());
+}
+
+bool Client::MatchContactProof(const std::string& transcript,
+                               const std::string& proof,
+                               Contact& matched)
+{
+    if (proof.empty())
+        return false;
+    std::lock_guard<std::mutex> lk(m_contactsMutex);
+    for (const auto& c : m_config.contacts)
+    {
+        const std::string expected = MakeContactProof(c, transcript);
+        if (!expected.empty() && constantTimeEquals(proof, expected))
+        {
+            matched = c;
+            return true;
+        }
+    }
+    return false;
+}
+
+void Client::UpdateContactDestination(const std::string& oldDestination,
+                                      const std::string& newDestination)
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_contactsMutex);
+        for (auto& c : m_config.contacts)
+        {
+            if (c.destination == oldDestination)
+            {
+                c.destination = newDestination;
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (changed)
+        SaveConfig();
+}
+
+void Client::SendContactAdd(const std::shared_ptr<Peer>& peer)
+{
+    if (!peer || peer->isRelay())
+        return;
+
+    const std::string secret = base64Encode(randomBytes(32));
+    Contact c;
+    c.nick = peer->nickname();
+    c.destination = peer->destination();
+    c.secret = secret;
+
+    {
+        std::lock_guard<std::mutex> lk(m_contactsMutex);
+        bool replaced = false;
+        for (auto& existing : m_config.contacts)
+        {
+            if (existing.destination == c.destination)
+            {
+                existing = c;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced)
+            m_config.contacts.push_back(c);
+    }
+    SaveConfig();
+
+    /* The peer stores the same secret, so future handshakes prove identity. */
+    peer->sendEncrypted("CONTACT_ADD", c.nick + "|" + c.secret);
+    WriteMessage("[contacts] added " + colorNick(c.nick) +
+                 " (#" + std::to_string(peer->id()) + ")");
+}
+
+void Client::ForgetFlood(int peerId)
+{
+    std::lock_guard<std::mutex> lk(m_floodMutex);
+    m_flood.erase(peerId);
+}
+
+bool Client::CheckFlood(Peer& peer, bool garbage, bool dhRequest,
+                        const std::string& text, std::string& why)
+{
+    const std::uint64_t now = nowSeconds();
+    const unsigned window = std::max(1u, m_config.floodWindowSec);
+    bool currentKick = false;
+    bool warn = false;
+    std::string warning;
+    std::vector<int> burstKick;
+    std::string banReason;
+    int peerId = peer.id();
+
+    {
+        std::lock_guard<std::mutex> lk(m_floodMutex);
+        FloodState& st = m_flood[peerId];
+        if (st.windowStart == 0 || now - st.windowStart >= window)
+        {
+            st = FloodState{};
+            st.windowStart = now;
+        }
+
+        ++st.messages;
+        if (garbage)
+            ++st.garbage;
+        if (dhRequest)
+            ++st.dh;
+
+        if (!text.empty())
+        {
+            bool repeat = false;
+            for (const auto& old : st.recent)
+            {
+                if (old == text)
+                {
+                    repeat = true;
+                    break;
+                }
+            }
+            if (repeat)
+                ++st.repeats;
+            st.recent.push_back(text);
+            if (st.recent.size() > 12)
+                st.recent.pop_front();
+        }
+
+        const unsigned half = std::max(2u, m_config.floodMessageLimit / 2);
+        if (m_config.floodMessageLimit > 0 && st.messages >= half)
+        {
+            for (const auto& it : m_flood)
+            {
+                if (it.first != peerId && it.second.windowStart != 0 &&
+                    now - it.second.windowStart < window &&
+                    it.second.messages >= half)
+                    burstKick.push_back(it.first);
+            }
+            if (!burstKick.empty())
+            {
+                burstKick.push_back(peerId);
+                currentKick = true;
+                why = "several peers are flooding the client at once";
+                banReason = why;
+            }
+        }
+
+        if (!currentKick && m_config.floodMessageLimit > 0 &&
+            st.messages > m_config.floodMessageLimit)
+        {
+            currentKick = true;
+            why = "too many messages in " + std::to_string(window) + "s";
+            banReason = "message flood";
+        }
+        if (!currentKick && m_config.floodRepeatLimit > 0 &&
+            st.repeats > m_config.floodRepeatLimit)
+        {
+            currentKick = true;
+            why = "too many repeated messages";
+            banReason = "repeat flood";
+        }
+        if (!currentKick && m_config.floodGarbageLimit > 0 &&
+            st.garbage > m_config.floodGarbageLimit)
+        {
+            currentKick = true;
+            why = "too much garbage";
+            banReason = "garbage flood";
+        }
+        if (!currentKick && m_config.floodDhLimit > 0 &&
+            st.dh > m_config.floodDhLimit)
+        {
+            currentKick = true;
+            why = "too many DH / rekey requests";
+            banReason = "DH flood";
+        }
+
+        if (!currentKick && !st.warned &&
+            m_config.floodMessageLimit > 0 &&
+            st.messages >= (m_config.floodMessageLimit * 3) / 4)
+        {
+            st.warned = true;
+            warn = true;
+            warning = "warning: #" + std::to_string(peerId) + " " +
+                      peer.nickname() + " is sending messages very fast";
+        }
+
+        m_globalMessageTimes.push_back(now);
+        while (!m_globalMessageTimes.empty() &&
+               now - m_globalMessageTimes.front() >= window)
+            m_globalMessageTimes.pop_front();
+        if (m_globalMessageTimes.size() > 200 && !currentKick)
+        {
+            warn = true;
+            warning = "warning: unusually high message rate from many peers";
+        }
+    }
+
+    if (warn && !warning.empty())
+        WriteMessage(colorText(warning, "1;33"));
+
+    for (int id : burstKick)
+    {
+        if (id == peerId)
+            continue;
+        auto p = FindPeerById(id);
+        if (p)
+        {
+            DropPeer(id, "anti-flood: " + why);
+            BanDestination(p->destination(), p->fingerprint(), banReason);
+        }
+    }
+
+    if (currentKick && !banReason.empty())
+        why = banReason;
+    return currentKick;
+}
+
+void Client::BanDestination(const std::string& destination,
+                            const std::string& fingerprint,
+                            const std::string& reason,
+                            unsigned seconds)
+{
+    const std::string key = banKeyFor(destination, fingerprint);
+    if (key.empty())
+        return;
+
+    const std::uint64_t now = nowSeconds();
+    unsigned duration = seconds;
+    bool attack = false;
+
+    {
+        std::lock_guard<std::mutex> lk(m_banMutex);
+
+        /* Expired entries are useless and would otherwise grow forever. */
+        for (auto it = m_bans.begin(); it != m_bans.end();)
+        {
+            if (it->second.until <= now)
+                it = m_bans.erase(it);
+            else
+                ++it;
+        }
+
+        auto usedBytes = [this]() {
+            std::size_t total = 0;
+            for (const auto& it : m_bans)
+                total += it.first.size() + it.second.destination.size() +
+                         it.second.fingerprint.size() + it.second.reason.size() + 96;
+            return total;
+        };
+        auto enterAttack = [&]() {
+            if (m_attackModeUntil <= now)
+            {
+                m_attackModeUntil = now + 300;
+                attack = true;
+            }
+        };
+
+        const std::size_t limit =
+            static_cast<std::size_t>(m_config.banMemoryLimitMb) * 1024 * 1024;
+        const bool manual = reason == "manual ban";
+
+        /*
+         * A targeted attack can fill the ban table faster than the bans
+         * expire.  Once the configured memory budget is reached, stop adding
+         * automatic bans and ignore unknown peers for a few minutes instead.
+         * Explicit /ban entries are still honoured.
+         */
+        if (!manual && limit > 0 && usedBytes() >= limit)
+        {
+            enterAttack();
+        }
+        else
+        {
+            BanEntry& e = m_bans[key];
+            if (e.destination.empty())
+                e.destination = destination;
+            if (e.fingerprint.empty())
+                e.fingerprint = fingerprint;
+            ++e.stage;
+
+            if (duration == 0)
+            {
+                duration = std::max(1u, m_config.banInitialSeconds);
+                for (unsigned i = 1; i < e.stage; ++i)
+                {
+                    if (duration >= m_config.banMaxSeconds / 2)
+                    {
+                        duration = m_config.banMaxSeconds;
+                        break;
+                    }
+                    duration *= 2;
+                }
+                duration = std::min(duration,
+                                   std::max(1u, m_config.banMaxSeconds));
+            }
+            e.until = now + duration;
+            e.reason = reason;
+
+            if (!manual && limit > 0 && usedBytes() > limit)
+                enterAttack();
+        }
+    }
+
+    if (attack)
+    {
+        WriteMessage(colorText(
+            "[!] ban memory limit reached: targeted attack detected. "
+            "New unknown peers are ignored for 5 minutes. Consider changing "
+            "your Destination (/reidentity).",
+            "1;31"));
+    }
+}
+
+bool Client::IsBanned(const std::string& destination,
+                      const std::string& fingerprint,
+                      std::string& reason)
+{
+    const std::uint64_t now = nowSeconds();
+    std::lock_guard<std::mutex> lk(m_banMutex);
+    for (const auto& it : m_bans)
+    {
+        const BanEntry& e = it.second;
+        if ((!destination.empty() && e.destination == destination) ||
+            (!fingerprint.empty() && e.fingerprint == fingerprint))
+        {
+            if (e.until > now)
+            {
+                reason = e.reason;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void Client::DropBannedPeers(const std::string& destination,
+                             const std::string& fingerprint)
+{
+    for (const auto& p : SnapshotPeers())
+    {
+        if ((!destination.empty() && p->destination() == destination) ||
+            (!fingerprint.empty() && p->fingerprint() == fingerprint))
+            DropPeer(p->id(), "banned");
+    }
+}
+
+bool Client::BanMemoryExceeded()
+{
+    std::lock_guard<std::mutex> lk(m_banMutex);
+    std::size_t total = 0;
+    for (const auto& it : m_bans)
+        total += it.first.size() + it.second.destination.size() +
+                 it.second.fingerprint.size() + it.second.reason.size() + 96;
+    return m_config.banMemoryLimitMb > 0 &&
+           total > static_cast<std::size_t>(m_config.banMemoryLimitMb) * 1024 * 1024;
+}
+
+void Client::EnterAttackMode()
+{
+    const std::uint64_t now = nowSeconds();
+    bool show = false;
+    {
+        std::lock_guard<std::mutex> lk(m_banMutex);
+        if (m_attackModeUntil <= now)
+        {
+            m_attackModeUntil = now + 300;
+            show = true;
+        }
+    }
+    if (show)
+        WriteMessage(colorText("[!] targeted attack detected; ignoring unknown "
+                               "peers for 5 minutes",
+                               "1;31"));
+}
+
+void Client::ExpirePending()
+{
+    std::vector<int> expired;
+    const std::uint64_t now = nowSeconds();
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMutex);
+        for (const auto& it : m_pending)
+        {
+            if (it.second && it.second->expires <= now)
+                expired.push_back(it.first);
+        }
+    }
+    for (int id : expired)
+        DenyPending(id);
+}
+
+bool Client::AcceptPending(int id)
+{
+    std::shared_ptr<PendingPeer> pending;
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMutex);
+        auto it = m_pending.find(id);
+        if (it == m_pending.end())
+            return false;
+        pending = it->second;
+        m_pending.erase(it);
+    }
+    if (!pending)
+        return false;
+
+    auto peer = RegisterPeer(std::move(pending->sock),
+                             pending->remote,
+                             pending->groupP,
+                             pending->groupG,
+                             pending->key,
+                             false,
+                             kRelayDirect,
+                             false,
+                             std::move(pending->pendingRx));
+    if (!peer)
+        return false;
+
+    WriteMessage(colorText("[+] accepted #" + std::to_string(id) + " " +
+                               pending->remote.nick,
+                           "1;32"));
+    if (ActivePeer() < 0)
+        SetActivePeer(peer->id());
+    return true;
+}
+
+bool Client::DenyPending(int id)
+{
+    std::shared_ptr<PendingPeer> pending;
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMutex);
+        auto it = m_pending.find(id);
+        if (it == m_pending.end())
+            return false;
+        pending = it->second;
+        m_pending.erase(it);
+    }
+    if (pending && pending->sock)
+    {
+        pending->sock->write("BYE\n");
+        pending->sock->close();
+    }
+    WriteMessage("[deny] incoming request #" + std::to_string(id) +
+                 " was not accepted");
+    return true;
+}
+
+void Client::ResetReidentity(const std::string& reason)
+{
+    std::string wiped;
+    {
+        std::lock_guard<std::mutex> lk(m_reidentMutex);
+        m_reidentActive = false;
+        wiped.swap(m_reidentNewPriv);
+        m_reidentNewPub.clear();
+        m_reidentSigType.clear();
+        m_reidentWaiting.clear();
+        m_reidentDeadline = 0;
+    }
+    secureWipe(wiped);
+    if (!reason.empty())
+        WriteMessage(colorText("[reidentity] " + reason, "1;33"));
+}
+
+void Client::FinishReidentity()
+{
+    std::string newPriv;
+    std::string newPub;
+    std::string newSig;
+    {
+        std::lock_guard<std::mutex> lk(m_reidentMutex);
+        if (!m_reidentActive)
+            return;
+        newPriv = m_reidentNewPriv;
+        newPub = m_reidentNewPub;
+        newSig = m_reidentSigType;
+        secureWipe(m_reidentNewPriv);
+        m_reidentNewPriv.clear();
+        m_reidentNewPub.clear();
+        m_reidentSigType.clear();
+        m_reidentWaiting.clear();
+        m_reidentActive = false;
+        m_reidentDeadline = 0;
+    }
+
+    secureWipe(m_config.privateKey);
+    m_config.privateKey = newPriv;
+    if (!newSig.empty())
+        m_config.samSignatureType = newSig;
+    m_config.samSession = "TriMessage-" + Nick() + "-" + randomHex(2);
+    secureWipe(newPriv);
+
+    if (!SaveConfig())
+    {
+        WriteMessage("[!] could not save the new identity; keeping the old one");
+        return;
+    }
+
+    WriteMessage(colorText("[reidentity] all contacts confirmed the new "
+                           "destination. Restarting with the new identity.",
+                           "1;32"));
+    WriteMessage("new destination: " + newPub);
+    WriteMessage("the client will exit now; start it again");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ShutdownNow();
+}
+
+void Client::OnReidentityRequest(Peer& peer, const std::string& newDestination)
+{
+    Contact c;
+    if (!FindContactByDest(peer.destination(), c))
+    {
+        WriteMessage(colorText("[!] ignoring /reidentity from a non-contact #" +
+                                   std::to_string(peer.id()),
+                               "1;31"));
+        return;
+    }
+
+    const std::string dest = normaliseDestination(newDestination);
+    if (dest.empty() || dest == MyPub())
+        return;
+
+    peer.sendEncrypted("REIDENTITY_ACK", dest);
+    WriteMessage(colorText("[reidentity] contact " + c.nick +
+                               " is moving to a new Destination; the contact "
+                               "was updated",
+                           "1;33"));
+    UpdateContactDestination(peer.destination(), dest);
+}
+
+void Client::OnReidentityAck(Peer& peer, const std::string& newDestination)
+{
+    bool done = false;
+    {
+        std::lock_guard<std::mutex> lk(m_reidentMutex);
+        if (!m_reidentActive)
+            return;
+        if (normaliseDestination(newDestination) != m_reidentNewPub)
+            return;
+        m_reidentWaiting.erase(peer.destination());
+        done = m_reidentWaiting.empty();
+    }
+    if (done)
+        FinishReidentity();
+}
+
 
 void Client::AcceptLoop()
 {
@@ -493,6 +1168,60 @@ bool Client::HandleIncoming(std::unique_ptr<SAM::I2pSocket> sock)
             return false;
         }
 
+        if (!isValidNick(cli.nick))
+        {
+            sendLine("HELLO_REJECT invalid nickname: only ASCII letters, digits, "
+                     "'_', '-' and '.' are allowed");
+            WriteMessage(colorText("[!] rejected incoming peer with an invalid "
+                                   "nickname",
+                                   "1;31"));
+            return false;
+        }
+
+        std::string banReason;
+        if (IsBanned(cli.dest, cli.fp, banReason))
+        {
+            sendLine("HELLO_REJECT banned");
+            WriteMessage("[ban] rejected " + shortFp(cli.fp) + " (" +
+                         (banReason.empty() ? "banned" : banReason) + ")");
+            return false;
+        }
+
+        {
+            bool attack = false;
+            {
+                std::lock_guard<std::mutex> lk(m_banMutex);
+                attack = m_attackModeUntil > nowSeconds();
+            }
+            Contact known;
+            if (attack && !FindContactByDest(cli.dest, known))
+                return false;
+        }
+
+        /* Count HELLO/DH attempts per destination; a burst is an attack. */
+        bool tooManyDh = false;
+        {
+            const std::uint64_t now = nowSeconds();
+            const unsigned window = std::max(1u, m_config.floodWindowSec);
+            std::lock_guard<std::mutex> lk(m_floodMutex);
+            auto& attempts = m_dhAttempts[cli.dest];
+            while (!attempts.empty() && now - attempts.front() >= window)
+                attempts.pop_front();
+            attempts.push_back(now);
+            if (m_config.floodDhLimit > 0 &&
+                attempts.size() > m_config.floodDhLimit)
+                tooManyDh = true;
+        }
+        if (tooManyDh)
+        {
+            BanDestination(cli.dest, cli.fp, "DH handshake flood");
+            sendLine("HELLO_REJECT too many DH requests");
+            WriteMessage(colorText("[ban] " + shortFp(cli.fp) +
+                                       " is sending too many DH requests",
+                                   "1;31"));
+            return false;
+        }
+
         std::string reason;
         if (!CheckPeerDh(cli, false, reason))
         {
@@ -530,14 +1259,52 @@ bool Client::HandleIncoming(std::unique_ptr<SAM::I2pSocket> sock)
             return false;
 
         const std::string expected = makeProof(key, transcript, "client");
-        if (!constantTimeEquals(payload2, expected))
+        const auto authTokens = splitChar(payload2, ' ');
+        const std::string dhProof = authTokens.empty() ? std::string() : authTokens[0];
+        const std::string contactProof = authTokens.size() >= 2 ? authTokens[1] : std::string();
+        if (!constantTimeEquals(dhProof, expected))
         {
             sendLine("AUTH_FAIL");
             WriteMessage("[!] incoming HELLO failed authentication");
             return false;
         }
 
-        if (!sendLine("AUTH " + makeProof(key, transcript, "server")))
+        Contact matchedContact;
+        bool isContact = false;
+        Contact exactContact;
+        if (FindContactByDest(cli.dest, exactContact))
+        {
+            const std::string want = MakeContactProof(exactContact, transcript);
+            if (contactProof.empty() || want.empty() ||
+                !constantTimeEquals(contactProof, want))
+            {
+                sendLine("AUTH_FAIL contact proof is missing or wrong");
+                WriteMessage(colorText(
+                    "[!] someone is pretending to be contact " + exactContact.nick +
+                        " (wrong contact secret); connection refused",
+                    "1;31"));
+                return false;
+            }
+            matchedContact = exactContact;
+            isContact = true;
+        }
+        else if (!contactProof.empty() &&
+                 MatchContactProof(transcript, contactProof, matchedContact))
+        {
+            WriteMessage(colorText(
+                "[!] contact " + matchedContact.nick +
+                    " is knocking from a NEW Destination. The contact was "
+                    "updated after a successful proof.",
+                "1;33"));
+            UpdateContactDestination(matchedContact.destination, cli.dest);
+            matchedContact.destination = cli.dest;
+            isContact = true;
+        }
+
+        std::string serverAuth = "AUTH " + makeProof(key, transcript, "server");
+        if (isContact)
+            serverAuth += " " + MakeContactProof(matchedContact, transcript);
+        if (!sendLine(serverAuth))
             return false;
 
         if (!reader.readLine(line))
@@ -548,8 +1315,60 @@ bool Client::HandleIncoming(std::unique_ptr<SAM::I2pSocket> sock)
         if (!samDest.empty())
             cli.dest = samDest;
 
-        RegisterPeer(std::move(sock), cli, cli.p, cli.g, key,
-                     false, kRelayDirect, false, reader.takeBuffer());
+        if (isContact || m_config.autoAccept)
+        {
+            RegisterPeer(std::move(sock), cli, cli.p, cli.g, key,
+                         false, kRelayDirect, false, reader.takeBuffer());
+            return true;
+        }
+
+        const int pendingId = m_nextPendingId.fetch_add(1);
+        auto pending = std::make_shared<PendingPeer>();
+        pending->id = pendingId;
+        pending->sock = std::move(sock);
+        pending->remote = cli;
+        pending->groupP = cli.p;
+        pending->groupG = cli.g;
+        pending->key = key;
+        pending->pendingRx = reader.takeBuffer();
+        pending->expires = nowSeconds() + std::max(5u, m_config.waitAcceptTimeSec);
+        pending->contact = false;
+
+        /*
+         * Keep the approval queue bounded.  A peer that opens many parallel
+         * connections must not be able to exhaust memory with pending DH
+         * state, even before /accept is used.
+         */
+        std::vector<std::shared_ptr<PendingPeer>> droppedPending;
+        {
+            std::lock_guard<std::mutex> lk(m_pendingMutex);
+            m_pending[pendingId] = pending;
+            while (m_pending.size() > 32)
+            {
+                auto oldest = m_pending.begin();
+                droppedPending.push_back(oldest->second);
+                m_pending.erase(oldest);
+            }
+        }
+        for (const auto& old : droppedPending)
+        {
+            if (old && old->sock)
+            {
+                old->sock->write("BYE\n");
+                old->sock->close();
+            }
+        }
+        if (!droppedPending.empty())
+            WriteMessage("[!] too many pending connection requests; the oldest "
+                         "ones were denied");
+
+        WriteMessage(colorText(
+            "[?] incoming user " + colorNick(cli.nick) +
+                " fp=" + shortFp(cli.fp) + " wants to connect. "
+                "Use /accept " + std::to_string(pendingId) + " or /deny " +
+                std::to_string(pendingId) + " (auto-deny in " +
+                std::to_string(m_config.waitAcceptTimeSec) + "s)",
+            "1;33"));
         return true;
     }
     catch (const std::exception& e)
@@ -572,6 +1391,17 @@ std::shared_ptr<Peer> Client::ConnectTo(const std::string& destination)
     {
         WriteMessage("[!] this is my own destination. A relay and a client must "
                      "use different configs with different private_key values");
+        return nullptr;
+    }
+
+    Contact targetContact;
+    const bool haveContact = FindContactByDest(target, targetContact);
+
+    std::string bannedReason;
+    if (IsBanned(target, fingerprintOf(target), bannedReason))
+    {
+        WriteMessage("[!] destination is banned: " + bannedReason +
+                     " (use /delban to remove the ban)");
         return nullptr;
     }
 
@@ -715,6 +1545,8 @@ std::shared_ptr<Peer> Client::ConnectTo(const std::string& destination)
         std::string auth = "AUTH " + makeProof(key, transcript, "client");
         if (srv.passwordRequired)
             auth += " " + passwordProof;
+        if (haveContact && !isRelay)
+            auth += " " + MakeContactProof(targetContact, transcript);
 
         if (!sendLine(auth))
             return nullptr;
@@ -730,11 +1562,30 @@ std::shared_ptr<Peer> Client::ConnectTo(const std::string& destination)
                          (srv.passwordRequired ? ": wrong password" : ""));
             return nullptr;
         }
-        if (type2 != "AUTH" ||
-            !constantTimeEquals(payload2, makeProof(key, transcript, "server")))
+        if (type2 != "AUTH")
         {
             WriteMessage("[!] server failed authentication");
             return nullptr;
+        }
+        const auto serverAuth = splitChar(payload2, ' ');
+        if (serverAuth.empty() ||
+            !constantTimeEquals(serverAuth[0], makeProof(key, transcript, "server")))
+        {
+            WriteMessage("[!] server failed authentication");
+            return nullptr;
+        }
+        if (haveContact && !isRelay)
+        {
+            const std::string want = MakeContactProof(targetContact, transcript);
+            if (serverAuth.size() < 2 || want.empty() ||
+                !constantTimeEquals(serverAuth[1], want))
+            {
+                WriteMessage(colorText(
+                    "[!] server does not know the contact secret for " +
+                        targetContact.nick + "; connection refused",
+                    "1;31"));
+                return nullptr;
+            }
         }
 
         if (!sendLine("AUTH_OK"))
@@ -764,6 +1615,13 @@ std::shared_ptr<Peer> Client::RegisterPeer(std::unique_ptr<SAM::I2pSocket> sock,
     if (remote.dest == MyPub())
     {
         WriteMessage("[!] refusing to register my own destination as a peer");
+        sock.reset();
+        return nullptr;
+    }
+
+    if (!isValidNick(remote.nick))
+    {
+        WriteMessage("[!] refusing to register a peer with an invalid nickname");
         sock.reset();
         return nullptr;
     }
@@ -832,6 +1690,7 @@ bool Client::DropPeer(int id, const std::string& reason)
 
     peer->sendLine("BYE");
     peer->shutdown();
+    ForgetFlood(id);
     if (ActivePeer() == id)
         SetActivePeer(-1);
 
@@ -868,18 +1727,43 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
     const std::string type = sp == std::string::npos ? line : line.substr(0, sp);
     const std::string payload = sp == std::string::npos ? "" : line.substr(sp + 1);
 
+    auto floodKick = [&](bool garbage, bool dhRequest, const std::string& text) {
+        std::string why;
+        if (!CheckFlood(peer, garbage, dhRequest, text, why))
+            return false;
+        BanDestination(peer.destination(), peer.fingerprint(), why);
+        DropPeer(peer.id(), "anti-flood: " + why);
+        return true;
+    };
+
     if (type == "MSG")
     {
         std::string plain;
         if (!peer.decrypt(payload, plain))
         {
-            WriteMessage("[!] can't decrypt message from #" + std::to_string(peer.id()));
+            if (!floodKick(true, false, {}))
+                WriteMessage("[!] can't decrypt message from #" +
+                             std::to_string(peer.id()));
             return true;
         }
 
         PlainData data;
         if (!parsePlain(plain, data))
+        {
+            if (!floodKick(true, false, {}))
+                WriteMessage("[!] malformed message from #" +
+                             std::to_string(peer.id()));
             return true;
+        }
+
+        if (hasForbiddenControlBytes(data.text) ||
+            hasForbiddenControlBytes(data.type) ||
+            hasForbiddenControlBytes(data.fromFp) ||
+            hasForbiddenControlBytes(data.fromNick))
+        {
+            DropPeer(peer.id(), "forbidden control bytes in a message");
+            return false;
+        }
 
         if (!peer.isRelay() && data.fromFp != peer.fingerprint())
         {
@@ -888,15 +1772,90 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
             return true;
         }
 
+        const bool knownType =
+            data.type == "CHAT" || data.type == "PING" || data.type == "PONG" ||
+            data.type == "USERS" || data.type == "SERVER" ||
+            data.type == "CONTACT_ADD" || data.type == "CONTACT_ADD_OK" ||
+            data.type == "REIDENTITY" || data.type == "REIDENTITY_ACK";
+        if (!knownType)
+        {
+            if (!floodKick(true, false, {}))
+                WriteMessage("[!] unknown message type from #" +
+                             std::to_string(peer.id()));
+            return true;
+        }
+
         if (data.type == "CHAT")
         {
-            OnChat(peer, data);
+            if (!floodKick(false, false, data.text))
+                OnChat(peer, data);
+            return true;
         }
-        else if (data.type == "PING")
+        if (data.type == "PING")
         {
-            peer.sendEncrypted("PONG", data.text);
+            if (!floodKick(false, false, data.text))
+                peer.sendEncrypted("PONG", data.text);
+            return true;
         }
-        else if (data.type == "USERS" && peer.isRelay())
+        if (data.type == "CONTACT_ADD")
+        {
+            if (peer.isRelay())
+                return true;
+            const auto parts = splitChar(data.text, '|');
+            if (parts.size() != 2 || !isValidNick(trimCopy(parts[0])))
+                return true;
+            std::vector<std::uint8_t> secret;
+            if (!decodeContactSecret(trimCopy(parts[1]), secret) ||
+                secret.size() < 16)
+            {
+                DropPeer(peer.id(), "invalid contact secret");
+                return false;
+            }
+            Contact c;
+            c.nick = trimCopy(parts[0]);
+            c.destination = peer.destination();
+            c.secret = trimCopy(parts[1]);
+            secureZero(secret.data(), secret.size());
+            {
+                std::lock_guard<std::mutex> lk(m_contactsMutex);
+                bool replaced = false;
+                for (auto& existing : m_config.contacts)
+                {
+                    if (existing.destination == c.destination)
+                    {
+                        existing = c;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced)
+                    m_config.contacts.push_back(c);
+            }
+            SaveConfig();
+            peer.sendEncrypted("CONTACT_ADD_OK", c.nick);
+            WriteMessage(colorText("[contacts] " + colorNick(peer.nickname()) +
+                                       " added you as a contact",
+                                   "1;36"));
+            return true;
+        }
+        if (data.type == "CONTACT_ADD_OK")
+        {
+            WriteMessage(colorText("[contacts] " + colorNick(peer.nickname()) +
+                                       " confirmed the contact secret",
+                                   "1;36"));
+            return true;
+        }
+        if (data.type == "REIDENTITY")
+        {
+            OnReidentityRequest(peer, data.text);
+            return true;
+        }
+        if (data.type == "REIDENTITY_ACK")
+        {
+            OnReidentityAck(peer, data.text);
+            return true;
+        }
+        if (data.type == "USERS" && peer.isRelay())
         {
             std::vector<std::string> roster;
             if (!data.text.empty())
@@ -934,7 +1893,8 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
         const long ms = peer.handlePong(payload);
         if (ms >= 0)
             WriteMessage("[pong] #" + std::to_string(peer.id()) + " " +
-                         peer.nickname() + ": " + std::to_string(ms) + " ms");
+                         colorNick(peer.nickname()) + ": " +
+                         std::to_string(ms) + " ms");
         return true;
     }
 
@@ -944,18 +1904,26 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
         if (base64Decode(payload, raw))
         {
             const std::string n(raw.begin(), raw.end());
+            if (!isValidNick(n))
+            {
+                DropPeer(peer.id(), "invalid nickname (non-ASCII or illegal characters)");
+                return false;
+            }
             peer.setNickname(n);
             WriteMessage("[nick] #" + std::to_string(peer.id()) + " is now " +
-                         peer.nickname());
+                         colorNick(peer.nickname()));
         }
         return true;
     }
 
     if (type == "REKEY")
     {
+        if (floodKick(false, true, {}))
+            return false;
         if (peer.handleRekey(payload))
             WriteMessage("[rekey] key refresh requested by #" +
-                         std::to_string(peer.id()) + " " + peer.nickname());
+                         std::to_string(peer.id()) + " " +
+                         colorNick(peer.nickname()));
         return true;
     }
 
@@ -963,7 +1931,7 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
     {
         if (peer.handleRekeyAck(payload))
             WriteMessage("[rekey] key refreshed with #" + std::to_string(peer.id()) +
-                         " " + peer.nickname());
+                         " " + colorNick(peer.nickname()));
         return true;
     }
 
@@ -971,13 +1939,16 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
     {
         if (peer.handleRekeyDone(payload))
             WriteMessage("[rekey] key refresh confirmed by #" +
-                         std::to_string(peer.id()) + " " + peer.nickname());
+                         std::to_string(peer.id()) + " " +
+                         colorNick(peer.nickname()));
         return true;
     }
 
     if (type == "BYE" || type == "AUTH_FAIL")
         return false;
 
+    if (!floodKick(true, false, {}))
+        WriteMessage("[!] unknown line from #" + std::to_string(peer.id()));
     return true;
 }
 
@@ -991,6 +1962,18 @@ void Client::RekeyLoop()
             break;
 
         const std::uint64_t now = nowSeconds();
+        ExpirePending();
+        {
+            bool expired = false;
+            {
+                std::lock_guard<std::mutex> lk(m_reidentMutex);
+                expired = m_reidentActive && m_reidentDeadline != 0 &&
+                          now >= m_reidentDeadline;
+            }
+            if (expired)
+                ResetReidentity("not all contacts confirmed in time; "
+                                "identity was not changed");
+        }
         const std::string myFp = MyFp();
         for (const auto& peer : SnapshotPeers())
         {
@@ -1043,7 +2026,17 @@ bool Client::CmdHelp(const ParamsT&)
     WriteMessage("/msg [id|nick] <text> - send an encrypted message");
     WriteMessage("/ping [id|nick|destination] - round-trip time (no args = all)");
     WriteMessage("/deluser <id|nick>    - drop a user and close the stream");
-    WriteMessage("/nick <name>          - change my nickname");
+    WriteMessage("/accept <id|all>      - accept an incoming connection request");
+    WriteMessage("/deny <id|all>        - reject an incoming connection request");
+    WriteMessage("/ban <id|nick|dest> [minutes] - ban a peer (default rising time)");
+    WriteMessage("/banlist              - show active bans");
+    WriteMessage("/delban <n|dest|fp|all> - remove a ban");
+    WriteMessage("/contacts [list]      - contacts and their online state");
+    WriteMessage("/contacts add <id|nick> | add <dest> [nick] [secret]");
+    WriteMessage("/contacts del <n|nick|dest>");
+    WriteMessage("/contacts connect <n|nick|dest> | connectall");
+    WriteMessage("/reidentity           - ask contacts to accept a new Destination");
+    WriteMessage("/nick <name>          - change my nickname (ASCII only)");
     WriteMessage("/rekey [id|nick]      - force a new DH exchange");
     WriteMessage("/settings [key value] - show or change persistent settings");
     WriteMessage("/decodeconf           - show the decrypted config (secrets hidden)");
@@ -1083,7 +2076,7 @@ bool Client::CmdStatus(const ParamsT&)
     for (const auto& p : peers)
     {
         const long ms = p->lastPingMs();
-        WriteMessage("  #" + std::to_string(p->id()) + " " + p->nickname() +
+        WriteMessage("  #" + std::to_string(p->id()) + " " + colorNick(p->nickname()) +
                      (p->isRelay() ? " (relay v" + std::to_string(p->relayVersion()) + ")" : "") +
                      " fp=" + shortFp(p->fingerprint()) +
                      (ms >= 0 ? " ping=" + std::to_string(ms) + "ms" : " ping=n/a"));
@@ -1098,7 +2091,13 @@ bool Client::CmdNick(const ParamsT& params)
         WriteMessage("usage: /nick <name>");
         return true;
     }
-    const std::string n = sanitizeNick(params[0]);
+    if (!isValidNick(params[0]))
+    {
+        WriteMessage("[!] nickname must contain only ASCII letters, digits, "
+                     "'_', '-' and '.' (max 32 chars)");
+        return true;
+    }
+    const std::string n = params[0];
     SetNick(n);
     m_config.nick = n;
     SaveConfig();
@@ -1117,6 +2116,566 @@ bool Client::CmdQuit(const ParamsT&)
     WriteMessage("bye");
     m_running.store(false);
     return false;
+}
+
+bool Client::CmdAccept(const ParamsT& params)
+{
+    if (params.empty())
+    {
+        WriteMessage("usage: /accept <id|all>   (see pending requests above)");
+        return true;
+    }
+
+    if (lower(params[0]) == "all")
+    {
+        std::vector<int> ids;
+        {
+            std::lock_guard<std::mutex> lk(m_pendingMutex);
+            for (const auto& it : m_pending)
+                ids.push_back(it.first);
+        }
+        if (ids.empty())
+        {
+            WriteMessage("no pending requests");
+            return true;
+        }
+        for (int id : ids)
+            AcceptPending(id);
+        return true;
+    }
+
+    try
+    {
+        const int id = std::stoi(params[0]);
+        if (!AcceptPending(id))
+            WriteMessage("no pending request #" + params[0]);
+    }
+    catch (...)
+    {
+        WriteMessage("usage: /accept <id|all>");
+    }
+    return true;
+}
+
+bool Client::CmdDeny(const ParamsT& params)
+{
+    if (params.empty())
+    {
+        WriteMessage("usage: /deny <id|all>");
+        return true;
+    }
+
+    if (lower(params[0]) == "all")
+    {
+        std::vector<int> ids;
+        {
+            std::lock_guard<std::mutex> lk(m_pendingMutex);
+            for (const auto& it : m_pending)
+                ids.push_back(it.first);
+        }
+        for (int id : ids)
+            DenyPending(id);
+        return true;
+    }
+
+    try
+    {
+        const int id = std::stoi(params[0]);
+        if (!DenyPending(id))
+            WriteMessage("no pending request #" + params[0]);
+    }
+    catch (...)
+    {
+        WriteMessage("usage: /deny <id|all>");
+    }
+    return true;
+}
+
+bool Client::CmdBan(const ParamsT& params)
+{
+    if (params.empty())
+    {
+        WriteMessage("usage: /ban <id|nick|destination|fingerprint> [minutes]");
+        return true;
+    }
+
+    std::string destination;
+    std::string fingerprint;
+    std::string nick;
+    if (auto peer = FindPeer(params[0]))
+    {
+        destination = peer->destination();
+        fingerprint = peer->fingerprint();
+        nick = peer->nickname();
+    }
+    else
+    {
+        destination = normaliseDestination(params[0]);
+        if (destination.empty())
+        {
+            const std::string t = lower(params[0]);
+            bool hex = !t.empty() && t.size() <= 32;
+            for (char c : t)
+            {
+                if (!std::isxdigit(static_cast<unsigned char>(c)))
+                {
+                    hex = false;
+                    break;
+                }
+            }
+            if (hex)
+                fingerprint = t;
+            else
+            {
+                const int idx = FindContactIndex(params[0]);
+                if (idx >= 0)
+                {
+                    std::lock_guard<std::mutex> lk(m_contactsMutex);
+                    destination = m_config.contacts[static_cast<std::size_t>(idx)].destination;
+                    fingerprint = fingerprintOf(destination);
+                    nick = m_config.contacts[static_cast<std::size_t>(idx)].nick;
+                }
+            }
+        }
+        else
+            fingerprint = fingerprintOf(destination);
+    }
+
+    if (destination.empty() && fingerprint.empty())
+    {
+        WriteMessage("[!] /ban expects a connected user, a destination, or a fingerprint");
+        return true;
+    }
+
+    unsigned seconds = 0;
+    if (params.size() >= 2)
+    {
+        try
+        {
+            const unsigned long minutes = std::stoul(params[1]);
+            seconds = static_cast<unsigned>(std::min<unsigned long>(minutes, 525600) * 60);
+        }
+        catch (...)
+        {
+            WriteMessage("[!] invalid ban time (minutes)");
+            return true;
+        }
+    }
+
+    BanDestination(destination, fingerprint, "manual ban", seconds);
+    DropBannedPeers(destination, fingerprint);
+    WriteMessage(colorText("[ban] " + (nick.empty() ? shortFp(fingerprint) : nick) +
+                               " is banned",
+                           "1;31"));
+    return true;
+}
+
+bool Client::CmdBanList(const ParamsT&)
+{
+    const std::uint64_t now = nowSeconds();
+    std::lock_guard<std::mutex> lk(m_banMutex);
+    if (m_bans.empty())
+    {
+        WriteMessage("ban list is empty");
+        return true;
+    }
+
+    WriteMessage("ban list (" + std::to_string(m_bans.size()) + "):");
+    int n = 0;
+    for (const auto& it : m_bans)
+    {
+        ++n;
+        const BanEntry& e = it.second;
+        const long long left = static_cast<long long>(e.until) -
+                               static_cast<long long>(now);
+        std::ostringstream os;
+        os << "  " << n << ". fp=" << shortFp(e.fingerprint)
+           << " stage=" << e.stage
+           << " " << (left > 0 ? "expires in " + std::to_string(left) + "s"
+                               : std::string("expired"))
+           << " reason=" << e.reason;
+        WriteMessage(os.str());
+    }
+    if (now < m_attackModeUntil)
+        WriteMessage(colorText("  ATTACK MODE active for another " +
+                                   std::to_string(m_attackModeUntil - now) + "s",
+                               "1;31"));
+    return true;
+}
+
+bool Client::CmdDelBan(const ParamsT& params)
+{
+    if (params.empty())
+    {
+        WriteMessage("usage: /delban <number|destination|fingerprint|all>");
+        return true;
+    }
+
+    if (lower(params[0]) == "all")
+    {
+        std::lock_guard<std::mutex> lk(m_banMutex);
+        m_bans.clear();
+        m_attackModeUntil = 0;
+        WriteMessage("ban list cleared");
+        return true;
+    }
+
+    std::string target = normaliseDestination(params[0]);
+    if (target.empty())
+        target = params[0];
+
+    int index = 0;
+    try
+    {
+        index = std::stoi(params[0]);
+    }
+    catch (...)
+    {
+        index = 0;
+    }
+
+    std::lock_guard<std::mutex> lk(m_banMutex);
+    int n = 0;
+    for (auto it = m_bans.begin(); it != m_bans.end(); ++it)
+    {
+        ++n;
+        const BanEntry& e = it->second;
+        const bool match = (index > 0 && n == index) ||
+                           (!target.empty() && (e.destination == target ||
+                                                e.fingerprint == target)) ||
+                           (!target.empty() && e.fingerprint.compare(0, target.size(),
+                                                                      lower(target)) == 0);
+        if (match)
+        {
+            m_bans.erase(it);
+            WriteMessage("ban removed");
+            return true;
+        }
+    }
+    WriteMessage("no such ban: " + params[0]);
+    return true;
+}
+
+bool Client::CmdContacts(const ParamsT& params)
+{
+    const std::string sub = params.empty() ? "list" : lower(params[0]);
+
+    if (sub == "list")
+    {
+        std::lock_guard<std::mutex> lk(m_contactsMutex);
+        if (m_config.contacts.empty())
+        {
+            WriteMessage("contact list is empty. Use /contacts add <id|nick> "
+                         "or /contacts add <destination> [nick] [secret]");
+            return true;
+        }
+        WriteMessage("contacts (" + std::to_string(m_config.contacts.size()) + "):");
+        for (std::size_t i = 0; i < m_config.contacts.size(); ++i)
+        {
+            const Contact& c = m_config.contacts[i];
+            bool online = false;
+            for (const auto& p : SnapshotPeers())
+            {
+                if (p->destination() == c.destination)
+                {
+                    online = true;
+                    break;
+                }
+            }
+            WriteMessage("  " + std::to_string(i + 1) + ". " + colorNick(c.nick) +
+                         (online ? colorText(" [online]", "1;32")
+                                 : colorText(" [offline]", "2")) +
+                         " fp=" + shortFp(fingerprintOf(c.destination)));
+        }
+        return true;
+    }
+
+    if (sub == "add")
+    {
+        if (params.size() < 2)
+        {
+            WriteMessage("usage: /contacts add <id|nick> | "
+                         "/contacts add <destination> [nick] [secret]");
+            return true;
+        }
+
+        if (auto peer = FindPeer(params[1]))
+        {
+            if (peer->isRelay())
+            {
+                WriteMessage("[!] a relay cannot be a contact");
+                return true;
+            }
+            SendContactAdd(peer);
+            return true;
+        }
+
+        const std::string dest = normaliseDestination(params[1]);
+        if (dest.empty())
+        {
+            WriteMessage("[!] not a connected user and not a full I2P destination");
+            return true;
+        }
+
+        Contact c;
+        c.destination = dest;
+        c.nick = params.size() >= 3 ? params[2]
+                                    : "contact" + std::to_string(m_config.contacts.size() + 1);
+        if (!isValidNick(c.nick))
+        {
+            WriteMessage("[!] contact nickname must be ASCII letters, digits, "
+                         "'_', '-' or '.'");
+            return true;
+        }
+
+        bool generated = false;
+        if (params.size() >= 4)
+        {
+            std::vector<std::uint8_t> secret;
+            if (!decodeContactSecret(params[3], secret))
+            {
+                WriteMessage("[!] contact secret must be base64 or hex");
+                return true;
+            }
+            c.secret = params[3];
+        }
+        else
+        {
+            c.secret = base64Encode(randomBytes(32));
+            generated = true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(m_contactsMutex);
+            bool replaced = false;
+            for (auto& existing : m_config.contacts)
+            {
+                if (existing.destination == c.destination)
+                {
+                    existing = c;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced)
+                m_config.contacts.push_back(c);
+        }
+        SaveConfig();
+        WriteMessage("contact " + colorNick(c.nick) + " saved (" +
+                     shortFp(fingerprintOf(c.destination)) + ")");
+        if (generated)
+            WriteMessage("shared secret (give it to the contact out of band): " +
+                         c.secret);
+        return true;
+    }
+
+    if (sub == "del" || sub == "remove" || sub == "rm")
+    {
+        if (params.size() < 2)
+        {
+            WriteMessage("usage: /contacts del <number|nick|destination>");
+            return true;
+        }
+        const int idx = FindContactIndex(params[1]);
+        if (idx < 0)
+        {
+            WriteMessage("no such contact: " + params[1]);
+            return true;
+        }
+        std::string nick;
+        {
+            std::lock_guard<std::mutex> lk(m_contactsMutex);
+            nick = m_config.contacts[static_cast<std::size_t>(idx)].nick;
+            m_config.contacts.erase(m_config.contacts.begin() + idx);
+        }
+        SaveConfig();
+        WriteMessage("contact " + colorNick(nick) + " removed");
+        return true;
+    }
+
+    if (sub == "connect")
+    {
+        if (params.size() < 2)
+        {
+            WriteMessage("usage: /contacts connect <number|nick|destination>");
+            return true;
+        }
+        std::string dest;
+        std::string nick;
+        if (const int idx = FindContactIndex(params[1]); idx >= 0)
+        {
+            std::lock_guard<std::mutex> lk(m_contactsMutex);
+            dest = m_config.contacts[static_cast<std::size_t>(idx)].destination;
+            nick = m_config.contacts[static_cast<std::size_t>(idx)].nick;
+        }
+        else
+            dest = normaliseDestination(params[1]);
+
+        if (dest.empty())
+        {
+            WriteMessage("no such contact: " + params[1]);
+            return true;
+        }
+        for (const auto& p : SnapshotPeers())
+        {
+            if (p->destination() == dest)
+            {
+                SetActivePeer(p->id());
+                WriteMessage("chat with #" + std::to_string(p->id()) + " " +
+                             colorNick(p->nickname()));
+                PrintPeerHistory(p);
+                return true;
+            }
+        }
+        WriteMessage("connecting to " + (nick.empty() ? shortFp(fingerprintOf(dest))
+                                                      : nick) + "...");
+        auto peer = ConnectTo(dest);
+        if (peer)
+        {
+            SetActivePeer(peer->id());
+            WriteMessage("active chat is now #" + std::to_string(peer->id()) + " " +
+                         colorNick(peer->nickname()));
+        }
+        return true;
+    }
+
+    if (sub == "connectall")
+    {
+        std::vector<Contact> contacts;
+        {
+            std::lock_guard<std::mutex> lk(m_contactsMutex);
+            contacts = m_config.contacts;
+        }
+        if (contacts.empty())
+        {
+            WriteMessage("contact list is empty");
+            return true;
+        }
+        for (const auto& c : contacts)
+        {
+            bool connected = false;
+            for (const auto& p : SnapshotPeers())
+            {
+                if (p->destination() == c.destination)
+                {
+                    connected = true;
+                    break;
+                }
+            }
+            if (connected)
+            {
+                WriteMessage("already connected to " + colorNick(c.nick));
+                continue;
+            }
+            WriteMessage("connecting to " + colorNick(c.nick) + "...");
+            ConnectTo(c.destination);
+        }
+        return true;
+    }
+
+    WriteMessage("usage: /contacts [list|add|del|connect|connectall] ...");
+    return true;
+}
+
+bool Client::CmdReidentity(const ParamsT&)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_reidentMutex);
+        if (m_reidentActive)
+        {
+            WriteMessage("reidentity is already in progress");
+            return true;
+        }
+    }
+    if (m_config.contacts.empty())
+    {
+        WriteMessage("[!] you have no contacts; add at least one first");
+        return true;
+    }
+
+    std::string newPriv;
+    std::string newPub;
+    std::string newSig;
+    try
+    {
+        SAM::StreamSession tmp("TriReKey-" + randomHex(4),
+                               m_config.samHost, m_config.samPort);
+        auto generated = tmp.destGenerate();
+        if (!generated.isOk || generated.value.pub.empty() ||
+            generated.value.priv.empty())
+        {
+            WriteMessage("[!] SAM could not generate a new destination");
+            return true;
+        }
+        newPriv = generated.value.priv;
+        newPub = generated.value.pub;
+        newSig = "DSA_SHA1";
+    }
+    catch (const std::exception& e)
+    {
+        WriteMessage(std::string("[!] can't generate a new destination: ") + e.what());
+        return true;
+    }
+
+    std::vector<std::shared_ptr<Peer>> targets;
+    {
+        std::lock_guard<std::mutex> lk(m_contactsMutex);
+        for (const auto& c : m_config.contacts)
+        {
+            for (const auto& p : SnapshotPeers())
+            {
+                if (!p->isRelay() && p->destination() == c.destination)
+                {
+                    targets.push_back(p);
+                    break;
+                }
+            }
+        }
+    }
+    if (targets.empty())
+    {
+        secureWipe(newPriv);
+        WriteMessage("[!] no contacts are online; /reidentity needs every "
+                     "contact to confirm the new destination");
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_reidentMutex);
+        m_reidentActive = true;
+        m_reidentNewPriv = newPriv;
+        m_reidentNewPub = newPub;
+        m_reidentSigType = newSig;
+        m_reidentWaiting.clear();
+        for (const auto& p : targets)
+            m_reidentWaiting.insert(p->destination());
+        m_reidentDeadline = nowSeconds() + 60;
+    }
+    secureWipe(newPriv);
+
+    for (const auto& p : targets)
+    {
+        if (!p->sendEncrypted("REIDENTITY", newPub))
+        {
+            std::lock_guard<std::mutex> lk(m_reidentMutex);
+            m_reidentWaiting.erase(p->destination());
+        }
+        else
+            WriteMessage("[reidentity] sent the new destination to " +
+                         colorNick(p->nickname()));
+    }
+
+    bool done = false;
+    {
+        std::lock_guard<std::mutex> lk(m_reidentMutex);
+        done = m_reidentActive && m_reidentWaiting.empty();
+    }
+    if (done)
+        FinishReidentity();
+    else
+        WriteMessage("[reidentity] waiting up to 60 seconds for all contacts "
+                     "to confirm");
+    return true;
 }
 
 bool Client::CmdSettings(const ParamsT& params)
@@ -1152,6 +2711,28 @@ bool Client::CmdSettings(const ParamsT& params)
                      std::string(m_config.relayAskPlain ? "true" : "false"));
         WriteMessage("  relay_password = " +
                      std::string(m_config.relayPassword.empty() ? "(not set)" : "(set, hidden)"));
+        WriteMessage("  auto_accept = " +
+                     std::string(m_config.autoAccept ? "true" : "false"));
+        WriteMessage("  wait_accept_time_sec = " +
+                     std::to_string(m_config.waitAcceptTimeSec));
+        WriteMessage("  flood_window_sec = " + std::to_string(m_config.floodWindowSec));
+        WriteMessage("  flood_repeat_limit = " +
+                     std::to_string(m_config.floodRepeatLimit));
+        WriteMessage("  flood_garbage_limit = " +
+                     std::to_string(m_config.floodGarbageLimit));
+        WriteMessage("  flood_dh_limit = " + std::to_string(m_config.floodDhLimit));
+        WriteMessage("  flood_message_limit = " +
+                     std::to_string(m_config.floodMessageLimit));
+        WriteMessage("  ban_initial_seconds = " +
+                     std::to_string(m_config.banInitialSeconds));
+        WriteMessage("  ban_max_seconds = " + std::to_string(m_config.banMaxSeconds));
+        WriteMessage("  ban_memory_limit_mb = " +
+                     std::to_string(m_config.banMemoryLimitMb));
+        WriteMessage("  colors = " + std::string(m_config.colors ? "true" : "false"));
+        {
+            std::lock_guard<std::mutex> lk(m_contactsMutex);
+            WriteMessage("  contacts = " + std::to_string(m_config.contacts.size()));
+        }
         WriteMessage("usage: /settings <key> <value>");
         return true;
     }
@@ -1393,7 +2974,8 @@ bool Client::CmdSettings(const ParamsT& params)
         return true;
     }
     if (key == "allow_huge_dh" || key == "server_mode" || key == "daemon_mode" ||
-        key == "relay_anonymous" || key == "relay_ask_plain")
+        key == "relay_anonymous" || key == "relay_ask_plain" ||
+        key == "auto_accept")
     {
         bool v = false;
         if (!parseBoolValue(value, v))
@@ -1406,11 +2988,109 @@ bool Client::CmdSettings(const ParamsT& params)
             m_config.daemonMode = v;
         else if (key == "relay_anonymous")
             m_config.relayAnonymous = v;
+        else if (key == "auto_accept")
+            m_config.autoAccept = v;
         else
             m_config.relayAskPlain = v;
         SaveConfig();
-        if (key != "allow_huge_dh")
+        if (key == "auto_accept")
+            WriteMessage(std::string("auto_accept is now ") +
+                         (v ? "on: incoming peers are accepted automatically"
+                            : "off: incoming peers need /accept"));
+        else if (key != "allow_huge_dh")
             WriteMessage(key + " saved; restart to apply");
+        return true;
+    }
+    if (key == "wait_accept_time_sec")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 5, 3600))
+            return bad("5..3600");
+        m_config.waitAcceptTimeSec = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "flood_window_sec")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 1, 3600))
+            return bad("1..3600");
+        m_config.floodWindowSec = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "flood_repeat_limit")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 0, 100000))
+            return bad("0..100000");
+        m_config.floodRepeatLimit = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "flood_garbage_limit")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 0, 100000))
+            return bad("0..100000");
+        m_config.floodGarbageLimit = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "flood_dh_limit")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 0, 100000))
+            return bad("0..100000");
+        m_config.floodDhLimit = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "flood_message_limit")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 0, 100000))
+            return bad("0..100000");
+        m_config.floodMessageLimit = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "ban_initial_seconds")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 1, 86400 * 30))
+            return bad("1..2592000");
+        m_config.banInitialSeconds = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "ban_max_seconds")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 1, 86400 * 365))
+            return bad("1..31536000");
+        m_config.banMaxSeconds = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "ban_memory_limit_mb")
+    {
+        unsigned v = 0;
+        if (!parseUnsigned(value, v, 0, 1024))
+            return bad("0..1024");
+        m_config.banMemoryLimitMb = v;
+        SaveConfig();
+        return true;
+    }
+    if (key == "colors")
+    {
+        bool v = false;
+        if (!parseBoolValue(value, v))
+            return bad("true/false");
+        m_config.colors = v;
+        setColorEnabled(v);
+        SaveConfig();
+        WriteMessage(std::string("colors ") + (v ? "enabled" : "disabled"));
         return true;
     }
     if (key == "relay_password")
@@ -1446,7 +3126,10 @@ bool Client::CmdSettings(const ParamsT& params)
                  "sam_session sam_signature_type dh_bits group_bits secret_bits "
                  "rekey_secret_bits max_peer_dh_bits allow_huge_dh sandbox "
                  "server_mode daemon_mode relay_version relay_limit "
-                 "relay_anonymous relay_ask_plain relay_password");
+                 "relay_anonymous relay_ask_plain relay_password auto_accept "
+                 "wait_accept_time_sec flood_window_sec flood_repeat_limit "
+                 "flood_garbage_limit flood_dh_limit flood_message_limit "
+                 "ban_initial_seconds ban_max_seconds ban_memory_limit_mb colors");
     return true;
 }
 
@@ -1488,6 +3171,27 @@ bool Client::CmdPanic(const ParamsT&)
     secureRemoveFile(configPath);
     secureRemoveFile(configPath + ".tmp");
     secureRemoveFile(configPath + ".bak");
+
+    {
+        std::lock_guard<std::mutex> lk(m_contactsMutex);
+        for (auto& c : m_config.contacts)
+        {
+            secureWipe(c.nick);
+            secureWipe(c.destination);
+            secureWipe(c.secret);
+        }
+        m_config.contacts.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_banMutex);
+        for (auto& it : m_bans)
+        {
+            secureWipe(it.second.destination);
+            secureWipe(it.second.fingerprint);
+            secureWipe(it.second.reason);
+        }
+        m_bans.clear();
+    }
 
     secureWipe(m_config.privateKey);
     secureWipe(m_config.relayPassword);
@@ -1588,7 +3292,7 @@ bool Client::CmdUsers(const ParamsT&)
         std::ostringstream line;
         line << (ActivePeer() == peer->id() ? "*" : " ")
              << " #" << peer->id()
-             << " " << peer->nickname()
+             << " " << colorNick(peer->nickname())
              << (peer->isRelay() ? " (relay v" + std::to_string(peer->relayVersion()) + ")" : "")
              << " fp=" << shortFp(peer->fingerprint())
              << " ping=" << (ms >= 0 ? std::to_string(ms) + "ms" : std::string("n/a"));
@@ -1718,6 +3422,17 @@ CommandsT commands
     {"del", [](Client& c, ParamsT p) { return c.CmdDelUser(p); }},
     {"kick", [](Client& c, ParamsT p) { return c.CmdDelUser(p); }},
     {"removeuser", [](Client& c, ParamsT p) { return c.CmdDelUser(p); }},
+    {"accept", [](Client& c, ParamsT p) { return c.CmdAccept(p); }},
+    {"deny", [](Client& c, ParamsT p) { return c.CmdDeny(p); }},
+    {"ban", [](Client& c, ParamsT p) { return c.CmdBan(p); }},
+    {"banlist", [](Client& c, ParamsT p) { return c.CmdBanList(p); }},
+    {"bans", [](Client& c, ParamsT p) { return c.CmdBanList(p); }},
+    {"delban", [](Client& c, ParamsT p) { return c.CmdDelBan(p); }},
+    {"unban", [](Client& c, ParamsT p) { return c.CmdDelBan(p); }},
+    {"contacts", [](Client& c, ParamsT p) { return c.CmdContacts(p); }},
+    {"contact", [](Client& c, ParamsT p) { return c.CmdContacts(p); }},
+    {"reidentity", [](Client& c, ParamsT p) { return c.CmdReidentity(p); }},
+    {"reid", [](Client& c, ParamsT p) { return c.CmdReidentity(p); }},
     {"nick", [](Client& c, ParamsT p) { return c.CmdNick(p); }},
     {"rekey", [](Client& c, ParamsT p) { return c.CmdRekey(p); }},
     {"settings", [](Client& c, ParamsT p) { return c.CmdSettings(p); }},

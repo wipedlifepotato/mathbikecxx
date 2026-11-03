@@ -132,8 +132,20 @@ jobs:
           if-no-files-found: warn
 
   build-windows:
-    name: Windows archive
+    name: Windows static (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msystem: MINGW64
+            prefix: mingw-w64-x86_64
+            arch: x86_64
+            makefile: Makefile.mingw64
+          - msystem: MINGW32
+            prefix: mingw-w64-i686
+            arch: i686
+            makefile: Makefile.mingw32
     defaults:
       run:
         shell: msys2 {0}
@@ -143,32 +155,43 @@ jobs:
           submodules: recursive
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.msystem }}
           update: true
           install: >-
             git
             make
             zip
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-gmp
-      - name: Build and package
+            ${{ matrix.prefix }}-gcc
+            ${{ matrix.prefix }}-gmp
+      - name: Build fully static Trie.exe
         env:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          make prepareSAM
-          make Trie
+          make -f ${{ matrix.makefile }} prepareSAM
+          make -f ${{ matrix.makefile }}
+
+          # Show every imported DLL.  On a static build only Windows system
+          # DLLs (kernel32, msvcrt, ws2_32, bcrypt, ...) may be listed; libgmp,
+          # libstdc++, libgcc and winpthread must NOT appear.
+          IMPORTS="$(objdump -p Trie.exe | sed -n 's/.*DLL Name: //p' | tr '[:upper:]' '[:lower:]')"
+          echo "$IMPORTS"
+          if echo "$IMPORTS" | grep -Eq 'lib(gmp|stdc|gcc|winpthread)'; then
+            echo "::error::Trie.exe is not fully static"
+            exit 1
+          fi
+
           mkdir -p dist
           cp Trie.exe dist/trigande.exe
           cp README.md usage.md dist/
           cd dist
-          zip -r "trigande-${VERSION}-windows-x86_64.zip" \
+          zip -r "trigande-${VERSION}-windows-${{ matrix.arch }}.zip" \
             trigande.exe README.md usage.md
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-dist
+          name: windows-${{ matrix.arch }}-dist
           path: dist/
 
   build-macos:
