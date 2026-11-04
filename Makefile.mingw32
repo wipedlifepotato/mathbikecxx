@@ -22,7 +22,9 @@ TRIPLET ?= i686-w64-mingw32
 endif
 
 CXX = $(TRIPLET)-g++
-AR = $(TRIPLET)-ar
+# MSYS2 ships binutils as plain "ar" (there is no triplet-prefixed ar).
+# ar is architecture-agnostic, so the host tool also works for cross builds.
+AR = ar
 GMP_PREFIX ?=
 
 MINGW_CPPFLAGS := $(if $(GMP_PREFIX),-I$(GMP_PREFIX)/include)
