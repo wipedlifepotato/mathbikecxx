@@ -10,6 +10,14 @@ Encrypted peer-to-peer and relay chat over I2P (SAM + ChaCha20).
   PBKDF2-HMAC-SHA256 + ChaCha20 + HMAC-SHA256.
 - Local process isolation: Landlock + seccomp on Linux, unveil + pledge on
   OpenBSD. It is enabled by default and can only be disabled explicitly.
+- Incoming connections can require approval (`/accept`, `/deny`), with
+  configurable anti-flood limits, temporary bans and `/banlist` / `/delban`.
+- Contacts are pinned to a Destination plus a 32-byte shared secret. A known
+  contact appearing at a new Destination triggers a warning, and
+  `/reidentity` moves you to a fresh Destination after all online contacts
+  confirm.
+- Nicknames are ASCII-only and validated at startup, on connect and on
+  changes; control bytes in decrypted messages terminate the connection.
 - `/decodeconf`, `/settings`, and `/panic` for inspecting the decrypted
   config, editing keys/settings, and wiping everything in an emergency.
 - Also includes a small `libtrigande` for sin/cos (`make lTrigande`,
@@ -41,8 +49,62 @@ Windows (MSYS2/MinGW-w64) and macOS are also buildable, but are **not fully
 isolated**; both the compiler and the program print a prominent warning. Use
 Linux or OpenBSD for real work.
 
+Static Windows binaries (no `libgmp`, `libstdc++`, `libgcc` or
+`libwinpthread` needed on the target machine):
+
+```bash
+make -f Makefile.mingw64                      # x86_64
+make -f Makefile.mingw32                      # i686
+make -f Makefile.mingw64 GMP_PREFIX=/opt/gmp  # separately built static GMP
+```
+
+Both Makefiles pass `-static -static-libgcc -static-libstdc++` and link GMP
+statically. CI builds both architectures and rejects the executable if
+`objdump -p Trie.exe` reports any non-system DLL.
+
 The binary is `./Trie`. The whole file format, CLI and commands are documented
 in [usage.md](usage.md).
+
+## Acceptance, anti-flood and contacts
+
+Incoming peers need `/accept` unless `auto_accept = true` or the peer proves a
+known contact secret. Pending requests expire after `wait_accept_time_sec`
+(default 45 seconds):
+
+```text
+/accept 2
+/deny 2
+```
+
+Repeated messages, repeated text, garbage frames and DH/REKEY bursts are
+counted per peer in `flood_window_sec`. A warning is shown at 75% of the
+message limit; exceeding any limit kicks and bans the peer. Bans start at one
+minute, double on each repeat offence and stop at 24 hours:
+
+```text
+/ban 2
+/ban <destination> 30
+/banlist
+/delban 1
+```
+
+`ban_memory_limit_mb` caps the ban table. When it is full, automatic bans stop
+for five minutes, unknown peers are ignored, and the client suggests changing
+your Destination with `/reidentity`.
+
+Contacts keep a Destination and a 32-byte shared secret:
+
+```text
+/contacts add 2
+/contacts add <destination> alice <secret>
+/contacts
+/contacts connectall
+```
+
+A contact connecting from a new Destination is accepted only with a valid
+secret and the change is reported. `/reidentity` asks every online contact to
+confirm a new Destination, then saves the new private key and exits; start the
+client again and use `/contacts connectall`.
 
 ## Config encryption
 
@@ -118,7 +180,9 @@ request. A tag `v*` publishes:
 
 - Linux binary, `.deb`, `.rpm`, AppImage;
 - OpenBSD binary;
-- Windows and macOS archives.
+- Windows archives: fully static x86_64 and i686 `trigande.exe` (only Windows
+  system DLLs are imported);
+- macOS archive.
 
 ## Tested
 

@@ -114,8 +114,15 @@ private:
         std::string contactNick;
     };
 
-    bool CheckFlood(Peer& peer, bool garbage, bool dhRequest,
-                    const std::string& text, std::string& why);
+    enum class FloodKind
+    {
+        Message,
+        Garbage,
+        DhRequest
+    };
+
+    bool CheckFlood(Peer& peer, FloodKind kind, const std::string& text,
+                    std::string& reason);
     void ForgetFlood(int peerId);
     void BanDestination(const std::string& destination,
                         const std::string& fingerprint,
@@ -198,7 +205,6 @@ private:
 
     std::mutex m_floodMutex;
     std::map<int, FloodState> m_flood;
-    std::deque<std::uint64_t> m_globalMessageTimes;
 
     /* Incoming DH/HELLO attempts per destination, for the DH-flood ban. */
     std::map<std::string, std::deque<std::uint64_t>> m_dhAttempts;

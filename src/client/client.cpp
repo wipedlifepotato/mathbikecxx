@@ -602,18 +602,16 @@ void Client::ForgetFlood(int peerId)
     m_flood.erase(peerId);
 }
 
-bool Client::CheckFlood(Peer& peer, bool garbage, bool dhRequest,
-                        const std::string& text, std::string& why)
+bool Client::CheckFlood(Peer& peer, FloodKind kind, const std::string& text,
+                        std::string& reason)
 {
     const std::uint64_t now = nowSeconds();
     const unsigned window = std::max(1u, m_config.floodWindowSec);
-    bool currentKick = false;
+    const int peerId = peer.id();
     bool warn = false;
-    std::string warning;
     std::vector<int> burstKick;
-    std::string banReason;
-    int peerId = peer.id();
 
+    reason.clear();
     {
         std::lock_guard<std::mutex> lk(m_floodMutex);
         FloodState& st = m_flood[peerId];
@@ -623,117 +621,85 @@ bool Client::CheckFlood(Peer& peer, bool garbage, bool dhRequest,
             st.windowStart = now;
         }
 
-        ++st.messages;
-        if (garbage)
-            ++st.garbage;
-        if (dhRequest)
-            ++st.dh;
-
-        if (!text.empty())
+        switch (kind)
         {
-            bool repeat = false;
-            for (const auto& old : st.recent)
+        case FloodKind::Message:
+            ++st.messages;
+            if (!text.empty())
             {
-                if (old == text)
+                if (std::find(st.recent.begin(), st.recent.end(), text) !=
+                    st.recent.end())
+                    ++st.repeats;
+                st.recent.push_back(text);
+                if (st.recent.size() > 12)
+                    st.recent.pop_front();
+            }
+
+            if (m_config.floodMessageLimit > 0 &&
+                st.messages > m_config.floodMessageLimit)
+            {
+                reason = "message flood";
+                /* Several peers flooding at once: drop all of them that are
+                 * already over the limit, not just the current one. */
+                for (const auto& it : m_flood)
                 {
-                    repeat = true;
-                    break;
+                    if (it.first != peerId && it.second.windowStart != 0 &&
+                        now - it.second.windowStart < window &&
+                        m_config.floodMessageLimit > 0 &&
+                        it.second.messages > m_config.floodMessageLimit)
+                        burstKick.push_back(it.first);
                 }
             }
-            if (repeat)
-                ++st.repeats;
-            st.recent.push_back(text);
-            if (st.recent.size() > 12)
-                st.recent.pop_front();
-        }
-
-        const unsigned half = std::max(2u, m_config.floodMessageLimit / 2);
-        if (m_config.floodMessageLimit > 0 && st.messages >= half)
-        {
-            for (const auto& it : m_flood)
+            else if (m_config.floodRepeatLimit > 0 &&
+                     st.repeats > m_config.floodRepeatLimit)
             {
-                if (it.first != peerId && it.second.windowStart != 0 &&
-                    now - it.second.windowStart < window &&
-                    it.second.messages >= half)
-                    burstKick.push_back(it.first);
+                reason = "repeat flood";
             }
-            if (!burstKick.empty())
+            else if (!st.warned && m_config.floodMessageLimit > 0 &&
+                     st.messages * 4 >= m_config.floodMessageLimit * 3)
             {
-                burstKick.push_back(peerId);
-                currentKick = true;
-                why = "several peers are flooding the client at once";
-                banReason = why;
+                /* Warn once, at 75% of the limit.  A short burst of normal
+                 * messages is nowhere near this, so it never bans. */
+                st.warned = true;
+                warn = true;
             }
-        }
+            break;
 
-        if (!currentKick && m_config.floodMessageLimit > 0 &&
-            st.messages > m_config.floodMessageLimit)
-        {
-            currentKick = true;
-            why = "too many messages in " + std::to_string(window) + "s";
-            banReason = "message flood";
-        }
-        if (!currentKick && m_config.floodRepeatLimit > 0 &&
-            st.repeats > m_config.floodRepeatLimit)
-        {
-            currentKick = true;
-            why = "too many repeated messages";
-            banReason = "repeat flood";
-        }
-        if (!currentKick && m_config.floodGarbageLimit > 0 &&
-            st.garbage > m_config.floodGarbageLimit)
-        {
-            currentKick = true;
-            why = "too much garbage";
-            banReason = "garbage flood";
-        }
-        if (!currentKick && m_config.floodDhLimit > 0 &&
-            st.dh > m_config.floodDhLimit)
-        {
-            currentKick = true;
-            why = "too many DH / rekey requests";
-            banReason = "DH flood";
-        }
+        case FloodKind::Garbage:
+            ++st.garbage;
+            if (m_config.floodGarbageLimit > 0 &&
+                st.garbage > m_config.floodGarbageLimit)
+                reason = "garbage flood";
+            break;
 
-        if (!currentKick && !st.warned &&
-            m_config.floodMessageLimit > 0 &&
-            st.messages >= (m_config.floodMessageLimit * 3) / 4)
-        {
-            st.warned = true;
-            warn = true;
-            warning = "warning: #" + std::to_string(peerId) + " " +
-                      peer.nickname() + " is sending messages very fast";
-        }
-
-        m_globalMessageTimes.push_back(now);
-        while (!m_globalMessageTimes.empty() &&
-               now - m_globalMessageTimes.front() >= window)
-            m_globalMessageTimes.pop_front();
-        if (m_globalMessageTimes.size() > 200 && !currentKick)
-        {
-            warn = true;
-            warning = "warning: unusually high message rate from many peers";
+        case FloodKind::DhRequest:
+            ++st.dh;
+            if (m_config.floodDhLimit > 0 &&
+                st.dh > m_config.floodDhLimit)
+                reason = "DH / rekey flood";
+            break;
         }
     }
 
-    if (warn && !warning.empty())
-        WriteMessage(colorText(warning, "1;33"));
+    if (warn)
+    {
+        WriteMessage(colorText(
+            "warning: #" + std::to_string(peerId) + " " + peer.nickname() +
+                " is sending messages very fast (" + std::to_string(window) +
+                "s window)",
+            "1;33"));
+    }
 
     for (int id : burstKick)
     {
-        if (id == peerId)
-            continue;
         auto p = FindPeerById(id);
-        if (p)
-        {
-            DropPeer(id, "anti-flood: " + why);
-            BanDestination(p->destination(), p->fingerprint(), banReason);
-        }
+        if (!p)
+            continue;
+        DropPeer(id, "anti-flood: " + reason);
+        BanDestination(p->destination(), p->fingerprint(), reason);
     }
 
-    if (currentKick && !banReason.empty())
-        why = banReason;
-    return currentKick;
+    return !reason.empty();
 }
 
 void Client::BanDestination(const std::string& destination,
@@ -1727,12 +1693,12 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
     const std::string type = sp == std::string::npos ? line : line.substr(0, sp);
     const std::string payload = sp == std::string::npos ? "" : line.substr(sp + 1);
 
-    auto floodKick = [&](bool garbage, bool dhRequest, const std::string& text) {
-        std::string why;
-        if (!CheckFlood(peer, garbage, dhRequest, text, why))
+    auto floodKick = [&](FloodKind kind, const std::string& text) {
+        std::string reason;
+        if (!CheckFlood(peer, kind, text, reason))
             return false;
-        BanDestination(peer.destination(), peer.fingerprint(), why);
-        DropPeer(peer.id(), "anti-flood: " + why);
+        BanDestination(peer.destination(), peer.fingerprint(), reason);
+        DropPeer(peer.id(), "anti-flood: " + reason);
         return true;
     };
 
@@ -1741,7 +1707,7 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
         std::string plain;
         if (!peer.decrypt(payload, plain))
         {
-            if (!floodKick(true, false, {}))
+            if (!floodKick(FloodKind::Garbage, {}))
                 WriteMessage("[!] can't decrypt message from #" +
                              std::to_string(peer.id()));
             return true;
@@ -1750,7 +1716,7 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
         PlainData data;
         if (!parsePlain(plain, data))
         {
-            if (!floodKick(true, false, {}))
+            if (!floodKick(FloodKind::Garbage, {}))
                 WriteMessage("[!] malformed message from #" +
                              std::to_string(peer.id()));
             return true;
@@ -1779,7 +1745,7 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
             data.type == "REIDENTITY" || data.type == "REIDENTITY_ACK";
         if (!knownType)
         {
-            if (!floodKick(true, false, {}))
+            if (!floodKick(FloodKind::Garbage, {}))
                 WriteMessage("[!] unknown message type from #" +
                              std::to_string(peer.id()));
             return true;
@@ -1787,13 +1753,13 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
 
         if (data.type == "CHAT")
         {
-            if (!floodKick(false, false, data.text))
+            if (!floodKick(FloodKind::Message, data.text))
                 OnChat(peer, data);
             return true;
         }
         if (data.type == "PING")
         {
-            if (!floodKick(false, false, data.text))
+            if (!floodKick(FloodKind::Message, data.text))
                 peer.sendEncrypted("PONG", data.text);
             return true;
         }
@@ -1918,7 +1884,7 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
 
     if (type == "REKEY")
     {
-        if (floodKick(false, true, {}))
+        if (floodKick(FloodKind::DhRequest, {}))
             return false;
         if (peer.handleRekey(payload))
             WriteMessage("[rekey] key refresh requested by #" +
@@ -1947,7 +1913,7 @@ bool Client::HandlePeerLine(Peer& peer, const std::string& line)
     if (type == "BYE" || type == "AUTH_FAIL")
         return false;
 
-    if (!floodKick(true, false, {}))
+    if (!floodKick(FloodKind::Garbage, {}))
         WriteMessage("[!] unknown line from #" + std::to_string(peer.id()));
     return true;
 }

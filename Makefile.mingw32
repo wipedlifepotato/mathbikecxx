@@ -21,8 +21,8 @@ else
 TRIPLET ?= i686-w64-mingw32
 endif
 
-CXX ?= $(TRIPLET)-g++
-AR ?= $(TRIPLET)-ar
+CXX = $(TRIPLET)-g++
+AR = $(TRIPLET)-ar
 GMP_PREFIX ?=
 
 MINGW_CPPFLAGS := $(if $(GMP_PREFIX),-I$(GMP_PREFIX)/include)
