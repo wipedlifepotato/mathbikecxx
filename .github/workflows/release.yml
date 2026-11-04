@@ -177,22 +177,35 @@ jobs:
           # libstdc++, libgcc and winpthread must NOT appear.
           IMPORTS="$(objdump -p Trie.exe | sed -n 's/.*DLL Name: //p' | tr '[:upper:]' '[:lower:]')"
           echo "$IMPORTS"
+          if [ -z "$IMPORTS" ]; then
+            echo "::error::could not read the import table of Trie.exe"
+            exit 1
+          fi
           if echo "$IMPORTS" | grep -Eq 'lib(gmp|stdc|gcc|winpthread)'; then
             echo "::error::Trie.exe is not fully static"
             exit 1
           fi
 
+          # The program must at least start on the runner.
+          ./Trie.exe --help >/dev/null
+
           mkdir -p dist
-          cp Trie.exe dist/trigande.exe
+          EXE="trigande-windows-${{ matrix.arch }}.exe"
+          cp Trie.exe "dist/${EXE}"
           cp README.md usage.md dist/
           cd dist
           zip -r "trigande-${VERSION}-windows-${{ matrix.arch }}.zip" \
-            trigande.exe README.md usage.md
+            "${EXE}" README.md usage.md
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.arch }}-dist
-          path: dist/
+          # Unique names per architecture: both raw executables must survive
+          # the release upload without one overwriting the other.
+          path: |
+            dist/trigande-windows-${{ matrix.arch }}.exe
+            dist/trigande-*-windows-${{ matrix.arch }}.zip
+          if-no-files-found: error
 
   build-macos:
     name: macOS archive
