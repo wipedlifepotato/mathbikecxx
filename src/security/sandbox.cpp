@@ -428,11 +428,6 @@ bool applyLinux(const SandboxOptions& options, std::string& err)
 #if defined(__OpenBSD__)
 bool applyOpenBSD(const SandboxOptions& options, std::string& err)
 {
-    auto allowRead = [](const char* path) {
-        if (path && *path)
-            ::unveil(path, "r");
-    };
-
     /*
      * The config file is the only file we need to read and write.  The
      * directory gets "wc" only so the atomic save (tmp + rename) and the
@@ -461,24 +456,19 @@ bool applyOpenBSD(const SandboxOptions& options, std::string& err)
     }
 
     /*
-     * Only runtime data that the already-loaded program may still ask for.
-     * Libraries, locales and the executable itself are mapped before the
-     * sandbox is installed, so /usr and friends are deliberately not unveiled.
+     * Nothing else is unveiled.  Libraries, locales, /etc and /dev are not
+     * needed at runtime: the executable is already mapped, the SAM bridge is
+     * reached by numeric IPv4 address, randomness uses arc4random, and
+     * stdin/stdout stay open.  Keeping the config and its directory as the
+     * only paths avoids granting /etc or /dev to a compromised process.
      */
-    const char* readPaths[] = {
-        "/etc/hosts", "/etc/resolv.conf", "/etc/services",
-        "/dev/urandom", "/dev/null", "/dev/tty"
-    };
-    for (const char* path : readPaths)
-        allowRead(path);
-
     if (::unveil(nullptr, nullptr) < 0)
     {
         err = std::string("unveil lock failed: ") + std::strerror(errno);
         return false;
     }
 
-    if (::pledge("stdio rpath wpath cpath fattr inet unix dns", nullptr) < 0)
+    if (::pledge("stdio rpath wpath cpath fattr inet", nullptr) < 0)
     {
         err = std::string("pledge failed: ") + std::strerror(errno);
         return false;

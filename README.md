@@ -157,9 +157,11 @@ really want to disable it permanently.
   `fork`, `ptrace`, `mount`, `bpf`, `io_uring`, module loading and similar
   calls. Networking stays available for SAM/I2P.
 - **OpenBSD:** unveil gives `rwc` only to the config file and `wc` to the
-  program directory (for `*.tmp` + `rename` and the daemon log), plus the
-  minimal `/etc` and `/dev` paths. System directories are not unveiled because
-  libraries are already loaded. pledge limits the syscall set.
+  program directory (for `*.tmp` + `rename` and the daemon log). Nothing else
+  is unveiled: no `/etc`, `/dev` or `/usr`. Libraries are already loaded, the
+  SAM host is a numeric IPv4 address, and randomness comes from `arc4random`
+  instead of `/dev/urandom`. pledge is limited to
+  `stdio rpath wpath cpath fattr inet`.
 
 ## Panic
 

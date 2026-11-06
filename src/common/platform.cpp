@@ -224,6 +224,10 @@ bool secureRandom(void* data, std::size_t len)
         BCRYPT_USE_SYSTEM_PREFERRED_RNG);
     if (status == 0)
         return true;
+#elif defined(__OpenBSD__)
+    /* No /dev/urandom access: the OpenBSD sandbox unveils only the config. */
+    ::arc4random_buf(data, len);
+    return true;
 #else
     const int fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd >= 0)
